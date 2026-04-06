@@ -1,2140 +1,2370 @@
+from __future__ import annotations
+
 import os
+import io
+import re
 import json
-import base64
-from datetime import datetime
-from io import BytesIO
+import time
+import math
+import random
+import textwrap
+import datetime as dt
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
-import yaml
-import pandas as pd
-import altair as alt
-from pypdf import PdfReader
+
+# Optional deps (guarded)
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 try:
-    from docx import Document  # python-docx
-except ImportError:
-    Document = None
+    import pandas as pd
+except Exception:
+    pd = None
 
 try:
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.pagesizes import letter
-except ImportError:
-    canvas = None
-    letter = None
+    import altair as alt
+except Exception:
+    alt = None
 
-from openai import OpenAI
-import google.generativeai as genai
-from anthropic import Anthropic
-import httpx
+try:
+    import requests
+except Exception:
+    requests = None
 
-# =========================
-# Constants & configuration
-# =========================
+try:
+    import httpx
+except Exception:
+    httpx = None
 
+try:
+    from pypdf import PdfReader
+except Exception:
+    PdfReader = None
+
+# LLM SDKs (guarded)
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+try:
+    from anthropic import Anthropic
+except Exception:
+    Anthropic = None
+
+# Graph rendering (optional)
+try:
+    import graphviz
+except Exception:
+    graphviz = None
+
+
+# -----------------------------
+# Constants & Localization
+# -----------------------------
+
+APP_TITLE = "WOW Agentic Regulatory Studio"
+APP_VERSION = "1.0.0"
+
+ENV_KEYS = {
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "grok": "GROK_API_KEY",
+}
+
+# Model registry
 ALL_MODELS = [
+    # OpenAI
     "gpt-4o-mini",
     "gpt-4.1-mini",
+    # Gemini
     "gemini-2.5-flash",
+    "gemini-3-flash-preview",
     "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+    # Anthropic (examples; allow user to add via agents.yaml too)
     "claude-3-5-sonnet-2024-10",
     "claude-3-5-haiku-20241022",
+    # Grok
     "grok-4-fast-reasoning",
     "grok-3-mini",
 ]
 
-OPENAI_MODELS = {"gpt-4o-mini", "gpt-4.1-mini"}
-GEMINI_MODELS = {"gemini-2.5-flash", "gemini-2.5-flash-lite"}
-ANTHROPIC_MODELS = {
-    "claude-3-5-sonnet-2024-10",
-    "claude-3-5-haiku-20241022",
-}
-GROK_MODELS = {"grok-4-fast-reasoning", "grok-3-mini"}
-
-PAINTER_STYLES = [
-    "Van Gogh", "Monet", "Picasso", "Da Vinci", "Rembrandt",
-    "Matisse", "Kandinsky", "Hokusai", "Yayoi Kusama", "Frida Kahlo",
-    "Salvador Dali", "Rothko", "Pollock", "Chagall", "Basquiat",
-    "Haring", "Georgia O'Keeffe", "Turner", "Seurat", "Escher",
+GEMINI_GUIDANCE_MODELS_STEP_A = [
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+]
+GEMINI_GUIDANCE_MODELS_STEP_B = [
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+]
+GEMINI_GUIDANCE_MODELS_STEP_C = [
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
 ]
 
-LABELS = {
-    "Dashboard": {"English": "Dashboard", "繁體中文": "儀表板"},
-    "TW Premarket": {
-        "English": "TW Premarket Application",
-        "繁體中文": "第二、三等級醫療器材查驗登記",
-    },
-    "510k_tab": {"English": "510(k) Intelligence", "繁體中文": "510(k) 智能分析"},
-    "PDF → Markdown": {"English": "PDF → Markdown", "繁體中文": "PDF → Markdown"},
-    "Checklist & Report": {
-        "English": "510(k) Review Pipeline",
-        "繁體中文": "510(k) 審查全流程",
-    },
-    "Note Keeper & Magics": {
-        "English": "Note Keeper & Magics",
-        "繁體中文": "筆記助手與魔法",
-    },
-    "Agents Config": {
-        "English": "Agents Config Studio",
-        "繁體中文": "代理設定工作室",
-    },
-}
+THEMES = ["Light", "Dark"]
+UI_LANGS = ["English", "繁體中文"]
 
+PAINTER_STYLES = [
+    "Monet",
+    "Van Gogh",
+    "Klimt",
+    "Picasso",
+    "Hokusai",
+    "Turner",
+    "Vermeer",
+    "Renoir",
+    "Matisse",
+    "Kandinsky",
+    "Dalí",
+    "Rembrandt",
+    "Frida Kahlo",
+    "Georgia O’Keeffe",
+    "Edward Hopper",
+    "Cézanne",
+    "Gauguin",
+    "Caravaggio",
+    "Magritte",
+    "Rothko",
+]
+
+# Painter style CSS (lightweight gradients; keep safe for Streamlit)
 STYLE_CSS = {
-    "Van Gogh": "body { background: radial-gradient(circle at top left, #243B55, #141E30); }",
-    "Monet": "body { background: linear-gradient(120deg, #a1c4fd, #c2e9fb); }",
-    "Picasso": "body { background: linear-gradient(135deg, #ff9a9e, #fecfef); }",
-    "Da Vinci": "body { background: radial-gradient(circle, #f9f1c6, #c9a66b); }",
-    "Rembrandt": "body { background: radial-gradient(circle, #2c1810, #0b090a); }",
-    "Matisse": "body { background: linear-gradient(135deg, #ffecd2, #fcb69f); }",
-    "Kandinsky": "body { background: linear-gradient(135deg, #00c6ff, #0072ff); }",
-    "Hokusai": "body { background: linear-gradient(135deg, #2b5876, #4e4376); }",
-    "Yayoi Kusama": "body { background: radial-gradient(circle, #ffdd00, #ff6a00); }",
-    "Frida Kahlo": "body { background: linear-gradient(135deg, #f8b195, #f67280, #c06c84); }",
-    "Salvador Dali": "body { background: linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d); }",
-    "Rothko": "body { background: linear-gradient(135deg, #141E30, #243B55); }",
-    "Pollock": "body { background: repeating-linear-gradient(45deg,#222,#222 10px,#333 10px,#333 20px); }",
-    "Chagall": "body { background: linear-gradient(135deg, #a18cd1, #fbc2eb); }",
-    "Basquiat": "body { background: linear-gradient(135deg, #f7971e, #ffd200); }",
-    "Haring": "body { background: linear-gradient(135deg, #ff512f, #dd2476); }",
-    "Georgia O'Keeffe": "body { background: linear-gradient(135deg, #ffefba, #ffffff); }",
-    "Turner": "body { background: linear-gradient(135deg, #f8ffae, #43c6ac); }",
-    "Seurat": "body { background: radial-gradient(circle, #e0eafc, #cfdef3); }",
-    "Escher": "body { background: linear-gradient(135deg, #232526, #414345); }",
+    "Monet": "linear-gradient(120deg, #d9f2ff 0%, #fff6e5 100%)",
+    "Van Gogh": "linear-gradient(120deg, #0b3d91 0%, #f9d65c 50%, #f26b38 100%)",
+    "Klimt": "linear-gradient(120deg, #fff3b0 0%, #d4af37 45%, #3b2f2f 100%)",
+    "Picasso": "linear-gradient(120deg, #ff595e 0%, #ffca3a 33%, #8ac926 66%, #1982c4 100%)",
+    "Hokusai": "linear-gradient(120deg, #e0f7ff 0%, #0b3d91 65%, #ffffff 100%)",
+    "Turner": "linear-gradient(120deg, #ffe29a 0%, #ff7a59 60%, #7bdff2 100%)",
+    "Vermeer": "linear-gradient(120deg, #0b1320 0%, #2b4c7e 55%, #f3d9b1 100%)",
+    "Renoir": "linear-gradient(120deg, #ffd6e8 0%, #fff1cc 100%)",
+    "Matisse": "linear-gradient(120deg, #ff4d6d 0%, #4d96ff 50%, #f9f871 100%)",
+    "Kandinsky": "linear-gradient(120deg, #111827 0%, #7c3aed 45%, #22c55e 100%)",
+    "Dalí": "linear-gradient(120deg, #0f172a 0%, #f59e0b 45%, #ef4444 100%)",
+    "Rembrandt": "linear-gradient(120deg, #1c1917 0%, #7c2d12 55%, #fbbf24 100%)",
+    "Frida Kahlo": "linear-gradient(120deg, #14532d 0%, #ef4444 50%, #fde047 100%)",
+    "Georgia O’Keeffe": "linear-gradient(120deg, #f8fafc 0%, #e2e8f0 45%, #111827 100%)",
+    "Edward Hopper": "linear-gradient(120deg, #0f172a 0%, #334155 55%, #fde68a 100%)",
+    "Cézanne": "linear-gradient(120deg, #dbeafe 0%, #fde68a 55%, #86efac 100%)",
+    "Gauguin": "linear-gradient(120deg, #7c3aed 0%, #fb7185 55%, #fbbf24 100%)",
+    "Caravaggio": "linear-gradient(120deg, #0b0f19 0%, #7f1d1d 55%, #f5f5f4 100%)",
+    "Magritte": "linear-gradient(120deg, #93c5fd 0%, #f8fafc 60%, #111827 100%)",
+    "Rothko": "linear-gradient(120deg, #7f1d1d 0%, #b45309 50%, #0f172a 100%)",
 }
 
-# =========================
-# Helper: localization & style
-# =========================
+I18N = {
+    "English": {
+        "sidebar_settings": "Settings",
+        "theme": "Theme",
+        "language": "UI Language",
+        "painter_style": "Painter Style",
+        "jackpot": "Jackpot style",
+        "default_model": "Default model",
+        "temperature": "Temperature",
+        "max_tokens": "Max tokens",
+        "api_keys": "API Keys",
+        "loaded_from_env": "Loaded from environment",
+        "enter_key": "Enter API key",
+        "clear_key": "Clear key",
+        "agents_catalog": "Agents Catalog",
+        "upload_agents_yaml": "Upload agents.yaml",
+        "tabs_dashboard": "Dashboard",
+        "tabs_tw": "TW Premarket",
+        "tabs_510k_intel": "510(k) Intelligence",
+        "tabs_pdf_md": "PDF → Markdown",
+        "tabs_510k_pipeline": "510(k) Review Pipeline",
+        "tabs_notes": "AI Note Keeper",
+        "tabs_guidance": "Guidance Reviewer & Research",
+        "tabs_agents": "Agents Config Studio",
+        "status": "Status",
+        "run": "Run",
+        "prompt": "Prompt",
+        "system_prompt": "System prompt",
+        "input": "Input",
+        "output": "Output",
+        "output_view": "Output view",
+        "markdown": "Markdown",
+        "text": "Text",
+        "download": "Download",
+        "save": "Save",
+        "error": "Error",
+        "ready": "Ready",
+        "running": "Running",
+        "done": "Done",
+        "blocked": "Blocked",
+        "needs_review": "Needs review",
+        "provider": "Provider",
+        "duration": "Duration",
+        "tokens_est": "Tokens (est.)",
+        "history": "Run history",
+        "reset": "Reset",
+        "offline_mode": "Offline mode (no external retrieval)",
+        "enable_web_retrieval": "Enable web retrieval (if network allowed)",
+        "output_language": "Output language",
+        "tc_default": "Traditional Chinese (default)",
+        "en": "English",
+        "upload_or_paste": "Upload or paste guidance",
+        "paste_here": "Paste here",
+        "file_upload": "Upload file (txt/md/pdf)",
+        "step_a": "Step A — Comprehensive grounded research report (2000–3000 words)",
+        "step_b": "Step B — Template-based report",
+        "step_c": "Step C — Generate skill.md",
+        "template": "Template",
+        "use_default_template": "Use default template",
+        "upload_template": "Upload template (md/txt)",
+        "knowledge_graph": "Regulatory Knowledge Graph",
+        "grounding_inspector": "Grounding Inspector",
+        "bilingual": "Bilingual side-by-side renderer",
+        "build_graph": "Build graph",
+        "inspect": "Inspect grounding",
+        "render_bilingual": "Render bilingual",
+    },
+    "繁體中文": {
+        "sidebar_settings": "設定",
+        "theme": "主題",
+        "language": "介面語言",
+        "painter_style": "畫家風格",
+        "jackpot": "Jackpot 隨機風格",
+        "default_model": "預設模型",
+        "temperature": "溫度",
+        "max_tokens": "最大 tokens",
+        "api_keys": "API 金鑰",
+        "loaded_from_env": "已由環境變數載入",
+        "enter_key": "輸入 API 金鑰",
+        "clear_key": "清除金鑰",
+        "agents_catalog": "Agents 目錄",
+        "upload_agents_yaml": "上傳 agents.yaml",
+        "tabs_dashboard": "儀表板",
+        "tabs_tw": "TFDA 查驗登記",
+        "tabs_510k_intel": "FDA 510(k) 情報",
+        "tabs_pdf_md": "PDF → Markdown",
+        "tabs_510k_pipeline": "510(k) 審查流程",
+        "tabs_notes": "AI 筆記保管員",
+        "tabs_guidance": "指引審閱與法規研究",
+        "tabs_agents": "Agents 設定工作室",
+        "status": "狀態",
+        "run": "執行",
+        "prompt": "提示詞",
+        "system_prompt": "系統提示詞",
+        "input": "輸入",
+        "output": "輸出",
+        "output_view": "輸出檢視",
+        "markdown": "Markdown",
+        "text": "文字",
+        "download": "下載",
+        "save": "儲存",
+        "error": "錯誤",
+        "ready": "就緒",
+        "running": "執行中",
+        "done": "完成",
+        "blocked": "被阻擋",
+        "needs_review": "需覆核",
+        "provider": "供應商",
+        "duration": "耗時",
+        "tokens_est": "Tokens（估）",
+        "history": "執行紀錄",
+        "reset": "重設",
+        "offline_mode": "離線模式（不進行外部檢索）",
+        "enable_web_retrieval": "啟用網路檢索（若環境允許）",
+        "output_language": "輸出語言",
+        "tc_default": "繁體中文（預設）",
+        "en": "英文",
+        "upload_or_paste": "上傳或貼上指引",
+        "paste_here": "貼在這裡",
+        "file_upload": "上傳檔案（txt/md/pdf）",
+        "step_a": "步驟 A — 生成 2000–3000 字、具引用之研究報告",
+        "step_b": "步驟 B — 套用模板產生報告",
+        "step_c": "步驟 C — 產生 skill.md",
+        "template": "模板",
+        "use_default_template": "使用預設模板",
+        "upload_template": "上傳模板（md/txt）",
+        "knowledge_graph": "法規知識圖譜",
+        "grounding_inspector": "引用/落地檢查器",
+        "bilingual": "雙語並排渲染器",
+        "build_graph": "建立圖譜",
+        "inspect": "檢查落地",
+        "render_bilingual": "生成雙語",
+    },
+}
+
 
 def t(key: str) -> str:
-    lang = st.session_state.settings.get("language", "English")
-    return LABELS.get(key, {}).get(lang, key)
+    lang = st.session_state.get("settings", {}).get("ui_lang", "English")
+    return I18N.get(lang, I18N["English"]).get(key, key)
 
 
-def apply_style(theme: str, painter_style: str):
-    css = STYLE_CSS.get(painter_style, "")
+# -----------------------------
+# Utilities
+# -----------------------------
+
+def now_iso() -> str:
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def approx_tokens(text: str) -> int:
+    # Rough heuristic: 4 chars/token (varies by language/model)
+    if not text:
+        return 0
+    return max(1, int(len(text) / 4))
+
+
+def safe_filename(name: str, default: str = "download") -> str:
+    name = re.sub(r"[^\w\-. ]+", "_", name.strip())
+    name = name.replace(" ", "_")
+    return name or default
+
+
+def apply_style(theme: str, painter_style: str) -> None:
+    bg = STYLE_CSS.get(painter_style, STYLE_CSS["Monet"])
     if theme == "Dark":
-        css += """
-        body { color: #e0e0e0; }
-        .stButton>button {
-            background-color: #1f2933; color: white; border-radius: 999px;
-        }
-        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div, .stDateInput>div>div>input {
-            background-color: #111827; color: #e5e7eb; border-radius: 0.5rem;
-        }
-        """
+        base_text = "#E5E7EB"
+        card_bg = "rgba(17, 24, 39, 0.65)"
+        border = "rgba(255, 255, 255, 0.08)"
+        input_bg = "rgba(17, 24, 39, 0.85)"
+        accent = "#22c55e"
     else:
-        css += """
-        body { color: #111827; }
-        .stButton>button {
-            background-color: #2563eb; color: white; border-radius: 999px;
-        }
-        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div, .stDateInput>div>div>input {
-            background-color: #ffffff; color: #111827; border-radius: 0.5rem;
-        }
-        """
-    # WOW status indicator extra CSS
-    css += """
-    .wow-card {
-        border-radius: 18px;
-        padding: 14px 18px;
-        margin-bottom: 0.75rem;
-        box-shadow: 0 14px 35px rgba(15,23,42,0.45);
-        color: #f9fafb;
-    }
-    .wow-card-title {
-        font-size: 0.85rem;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        opacity: 0.85;
-    }
-    .wow-card-main {
-        font-size: 1.4rem;
+        base_text = "#111827"
+        card_bg = "rgba(255, 255, 255, 0.72)"
+        border = "rgba(17, 24, 39, 0.10)"
+        input_bg = "rgba(255, 255, 255, 0.90)"
+        accent = "#0ea5e9"
+
+    css = f"""
+    <style>
+      .stApp {{
+        background: {bg};
+        background-attachment: fixed;
+        color: {base_text};
+      }}
+      .wow-card {{
+        background: {card_bg};
+        border: 1px solid {border};
+        padding: 14px 16px;
+        border-radius: 14px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.10);
+        margin: 8px 0;
+      }}
+      .wow-chip {{
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 999px;
+        border: 1px solid {border};
+        background: rgba(0,0,0,0.08);
+        font-size: 12px;
+        margin-right: 6px;
+      }}
+      .wow-status-idle {{ background: rgba(148,163,184,0.20); }}
+      .wow-status-ready {{ background: rgba(34,197,94,0.20); }}
+      .wow-status-running {{ background: rgba(245,158,11,0.25); }}
+      .wow-status-done {{ background: rgba(14,165,233,0.20); }}
+      .wow-status-error {{ background: rgba(239,68,68,0.25); }}
+      .wow-status-blocked {{ background: rgba(239,68,68,0.18); }}
+      .wow-status-review {{ background: rgba(168,85,247,0.20); }}
+
+      .wow-kpi {{
+        font-size: 28px;
+        font-weight: 800;
+        line-height: 1.0;
+      }}
+      .wow-muted {{ opacity: 0.8; font-size: 13px; }}
+
+      /* Inputs: try to improve contrast; Streamlit limits full control */
+      textarea, input {{
+        background: {input_bg} !important;
+      }}
+
+      /* Coral keyword highlight */
+      .kw-coral {{
+        color: #ff7f50;
         font-weight: 700;
-        margin-top: 4px;
-    }
-    .wow-badge {
-        display:inline-flex;
-        align-items:center;
-        padding:2px 10px;
-        border-radius:999px;
-        font-size:0.75rem;
-        font-weight:600;
-        background:rgba(15,23,42,0.2);
-        border:1px solid rgba(148,163,184,0.6);
-    }
+      }}
+    </style>
     """
-    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+    st.markdown(css, unsafe_allow_html=True)
 
-# =========================
-# LLM routing
-# =========================
 
-def get_provider(model: str) -> str:
-    if model in OPENAI_MODELS:
+def status_chip(status: str) -> str:
+    mapping = {
+        "Idle": "wow-status-idle",
+        "Ready": "wow-status-ready",
+        "Running": "wow-status-running",
+        "Done": "wow-status-done",
+        "Error": "wow-status-error",
+        "Blocked": "wow-status-blocked",
+        "Needs review": "wow-status-review",
+    }
+    css_class = mapping.get(status, "wow-status-idle")
+    return f'<span class="wow-chip {css_class}">{status}</span>'
+
+
+def provider_for_model(model: str) -> str:
+    m = (model or "").lower()
+    if m.startswith("gpt-"):
         return "openai"
-    if model in GEMINI_MODELS:
+    if m.startswith("gemini-"):
         return "gemini"
-    if model in ANTHROPIC_MODELS:
+    if "claude" in m:
         return "anthropic"
-    if model in GROK_MODELS:
+    if m.startswith("grok-"):
         return "grok"
-    raise ValueError(f"Unknown model: {model}")
+    # default: let it fail later with a good error
+    return "unknown"
 
+
+def get_api_key(provider: str) -> Tuple[Optional[str], str]:
+    """
+    Returns (api_key, source) where source in {"env","session","missing"}.
+    """
+    env_name = ENV_KEYS.get(provider)
+    if env_name:
+        v = os.getenv(env_name)
+        if v:
+            return v, "env"
+    key = st.session_state.get("api_keys", {}).get(provider)
+    if key:
+        return key, "session"
+    return None, "missing"
+
+
+def log_event(tab: str, agent: str, model: str, provider: str,
+              tokens_in: int, tokens_out: int, duration_ms: int,
+              extra: Optional[Dict[str, Any]] = None) -> None:
+    st.session_state.setdefault("history", [])
+    st.session_state["history"].append({
+        "ts": now_iso(),
+        "tab": tab,
+        "agent": agent,
+        "model": model,
+        "provider": provider,
+        "tokens_in_est": tokens_in,
+        "tokens_out_est": tokens_out,
+        "tokens_total_est": tokens_in + tokens_out,
+        "duration_ms": duration_ms,
+        **(extra or {}),
+    })
+
+
+# -----------------------------
+# LLM Call Router
+# -----------------------------
 
 def call_llm(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    max_tokens: int = 12000,
-    temperature: float = 0.2,
-    api_keys: dict | None = None,
+    max_tokens: int,
+    temperature: float,
 ) -> str:
-    provider = get_provider(model)
-    api_keys = api_keys or {}
+    provider = provider_for_model(model)
+    api_key, source = get_api_key(provider)
+    if not api_key:
+        raise RuntimeError(f"Missing API key for provider={provider} (source={source}).")
 
-    def get_key(name: str, env_var: str) -> str:
-        return api_keys.get(name) or os.getenv(env_var) or ""
+    max_tokens = int(clamp(max_tokens, 256, 120000))
+    temperature = float(clamp(temperature, 0.0, 1.0))
 
     if provider == "openai":
-        key = get_key("openai", "OPENAI_API_KEY")
-        if not key:
-            raise RuntimeError("Missing OpenAI API key.")
-        client = OpenAI(api_key=key)
+        if OpenAI is None:
+            raise RuntimeError("OpenAI SDK not installed.")
+        client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=max_tokens,
             temperature=temperature,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt or ""},
+                {"role": "user", "content": user_prompt or ""},
+            ],
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content or ""
 
     if provider == "gemini":
-        key = get_key("gemini", "GEMINI_API_KEY")
-        if not key:
-            raise RuntimeError("Missing Gemini API key.")
-        genai.configure(api_key=key)
-        llm = genai.GenerativeModel(model)
-        resp = llm.generate_content(
-            system_prompt + "\n\n" + user_prompt,
+        if genai is None:
+            raise RuntimeError("google-generativeai SDK not installed.")
+        genai.configure(api_key=api_key)
+        gmodel = genai.GenerativeModel(model)
+        # Gemini uses a different config name
+        resp = gmodel.generate_content(
+            (system_prompt or "") + "\n\n" + (user_prompt or ""),
             generation_config={
-                "max_output_tokens": max_tokens,
                 "temperature": temperature,
+                "max_output_tokens": max_tokens,
             },
         )
-        return resp.text
+        # Some responses provide .text; others in candidates
+        text = getattr(resp, "text", None)
+        if text:
+            return text
+        try:
+            return resp.candidates[0].content.parts[0].text
+        except Exception:
+            return str(resp)
 
     if provider == "anthropic":
-        key = get_key("anthropic", "ANTHROPIC_API_KEY")
-        if not key:
-            raise RuntimeError("Missing Anthropic API key.")
-        client = Anthropic(api_key=key)
+        if Anthropic is None:
+            raise RuntimeError("Anthropic SDK not installed.")
+        client = Anthropic(api_key=api_key)
         resp = client.messages.create(
             model=model,
-            system=system_prompt,
             max_tokens=max_tokens,
             temperature=temperature,
-            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt or "",
+            messages=[{"role": "user", "content": user_prompt or ""}],
         )
-        return resp.content[0].text
+        # Anthropic returns list of content blocks
+        out = []
+        for block in resp.content:
+            if getattr(block, "type", "") == "text":
+                out.append(block.text)
+        return "\n".join(out).strip()
 
     if provider == "grok":
-        key = get_key("grok", "GROK_API_KEY")
-        if not key:
-            raise RuntimeError("Missing Grok (xAI) API key.")
-        with httpx.Client(base_url="https://api.x.ai/v1", timeout=60) as client:
-            resp = client.post(
-                "/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return data["choices"][0]["message"]["content"]
-
-    raise RuntimeError(f"Unsupported provider for model {model}")
-
-# =========================
-# Generic helpers
-# =========================
-
-def show_status(step_name: str, status: str):
-    color = {
-        "pending": "gray",
-        "running": "#f59e0b",
-        "done": "#10b981",
-        "error": "#ef4444",
-    }.get(status, "gray")
-    st.markdown(
-        f"""
-        <div style="display:flex;align-items:center;margin-bottom:0.25rem;">
-          <div style="width:10px;height:10px;border-radius:50%;background:{color};
-                      margin-right:6px;"></div>
-          <span style="font-size:0.9rem;">{step_name} – <b>{status}</b></span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def log_event(tab: str, agent: str, model: str, tokens_est: int):
-    st.session_state["history"].append(
-        {
-            "tab": tab,
-            "agent": agent,
+        if httpx is None:
+            raise RuntimeError("httpx not installed (required for Grok).")
+        # xAI compatible endpoint
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        payload = {
             "model": model,
-            "tokens_est": tokens_est,
-            "ts": datetime.utcnow().isoformat(),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt or ""},
+                {"role": "user", "content": user_prompt or ""},
+            ],
         }
-    )
+        with httpx.Client(timeout=60.0) as client:
+            r = client.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        return data["choices"][0]["message"]["content"] or ""
+
+    raise RuntimeError(f"Unknown provider for model={model} (provider={provider}).")
 
 
-def extract_pdf_pages_to_text(file, start_page: int, end_page: int) -> str:
-    reader = PdfReader(file)
-    n = len(reader.pages)
-    start = max(0, start_page - 1)
-    end = min(n, end_page)
-    texts = []
-    for i in range(start, end):
-        try:
-            texts.append(reader.pages[i].extract_text() or "")
-        except Exception:
-            texts.append("")
-    return "\n\n".join(texts)
+# -----------------------------
+# Agents Catalog
+# -----------------------------
 
-
-def extract_docx_to_text(file) -> str:
-    if Document is None:
-        return ""
-    try:
-        bio = BytesIO(file.read())
-        doc = Document(bio)
-        return "\n".join(p.text for p in doc.paragraphs)
-    except Exception:
-        return ""
-
-
-def create_pdf_from_text(text: str) -> bytes:
-    if canvas is None or letter is None:
-        raise RuntimeError(
-            "PDF generation library 'reportlab' is not installed. "
-            "Please add 'reportlab' to requirements.txt."
-        )
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
-    width, height = letter
-    margin = 72
-    line_height = 14
-    y = height - margin
-    for line in text.splitlines():
-        if y < margin:
-            c.showPage()
-            y = height - margin
-        c.drawString(margin, y, line[:2000])
-        y -= line_height
-    c.save()
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def show_pdf(pdf_bytes: bytes, height: int = 600):
-    if not pdf_bytes:
-        return
-    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-    pdf_html = f"""
-    <iframe src="data:application/pdf;base64,{b64}"
-            width="100%" height="{height}" type="application/pdf"></iframe>
-    """
-    st.markdown(pdf_html, unsafe_allow_html=True)
-
-# =========================
-# Agent UI runner
-# =========================
-
-def agent_run_ui(
-    agent_id: str,
-    tab_key: str,
-    default_prompt: str,
-    default_input_text: str = "",
-    allow_model_override: bool = True,
-    tab_label_for_history: str | None = None,
-):
-    agents_cfg = st.session_state.get("agents_cfg", {})
-    agents_dict = agents_cfg.get("agents", {})
-
-    if agent_id in agents_dict:
-        agent_cfg = agents_dict[agent_id]
-    else:
-        agent_cfg = {
-            "name": agent_id,
-            "model": st.session_state.settings["model"],
-            "system_prompt": "",
-            "max_tokens": st.session_state.settings["max_tokens"],
-        }
-
-    status_key = f"{tab_key}_status"
-    if status_key not in st.session_state:
-        st.session_state[status_key] = "pending"
-
-    show_status(agent_cfg.get("name", agent_id), st.session_state[status_key])
-
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        user_prompt = st.text_area(
-            "Prompt",
-            value=st.session_state.get(f"{tab_key}_prompt", default_prompt),
-            height=160,
-            key=f"{tab_key}_prompt",
-        )
-    with col2:
-        base_model = agent_cfg.get("model", st.session_state.settings["model"])
-        model_index = ALL_MODELS.index(base_model) if base_model in ALL_MODELS else 0
-        model = st.selectbox(
-            "Model",
-            ALL_MODELS,
-            index=model_index,
-            disabled=not allow_model_override,
-            key=f"{tab_key}_model",
-        )
-    with col3:
-        max_tokens = st.number_input(
-            "max_tokens",
-            min_value=1000,
-            max_value=120000,
-            value=int(agent_cfg.get("max_tokens", st.session_state.settings["max_tokens"])),
-            step=1000,
-            key=f"{tab_key}_max_tokens",
-        )
-
-    input_text = st.text_area(
-        "Input Text / Markdown",
-        value=st.session_state.get(f"{tab_key}_input", default_input_text),
-        height=260,
-        key=f"{tab_key}_input",
-    )
-
-    run = st.button("Run Agent", key=f"{tab_key}_run")
-
-    if run:
-        st.session_state[status_key] = "running"
-        show_status(agent_cfg.get("name", agent_id), "running")
-        api_keys = st.session_state.get("api_keys", {})
-        system_prompt = agent_cfg.get("system_prompt", "")
-        user_full = f"{user_prompt}\n\n---\n\n{input_text}"
-
-        with st.spinner("Running agent..."):
-            try:
-                out = call_llm(
-                    model=model,
-                    system_prompt=system_prompt,
-                    user_prompt=user_full,
-                    max_tokens=max_tokens,
-                    temperature=st.session_state.settings["temperature"],
-                    api_keys=api_keys,
-                )
-                st.session_state[f"{tab_key}_output"] = out
-                st.session_state[status_key] = "done"
-                token_est = int(len(user_full + out) / 4)
-                log_event(
-                    tab_label_for_history or tab_key,
-                    agent_cfg.get("name", agent_id),
-                    model,
-                    token_est,
-                )
-            except Exception as e:
-                st.session_state[status_key] = "error"
-                st.error(f"Agent error: {e}")
-
-    output = st.session_state.get(f"{tab_key}_output", "")
-    view_mode = st.radio(
-        "View mode", ["Markdown", "Plain text"],
-        horizontal=True, key=f"{tab_key}_viewmode",
-    )
-    if view_mode == "Markdown":
-        edited = st.text_area(
-            "Output (Markdown, editable)",
-            value=output,
-            height=320,
-            key=f"{tab_key}_output_md",
-        )
-    else:
-        edited = st.text_area(
-            "Output (Plain text, editable)",
-            value=output,
-            height=320,
-            key=f"{tab_key}_output_txt",
-        )
-
-    st.session_state[f"{tab_key}_output_edited"] = edited
-
-# =========================
-# Sidebar
-# =========================
-
-def render_sidebar():
-    with st.sidebar:
-        st.markdown("### Global Settings")
-
-        st.session_state.settings["theme"] = st.radio(
-            "Theme", ["Light", "Dark"],
-            index=0 if st.session_state.settings["theme"] == "Light" else 1,
-        )
-
-        st.session_state.settings["language"] = st.radio(
-            "Language", ["English", "繁體中文"],
-            index=0 if st.session_state.settings["language"] == "English" else 1,
-        )
-
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            style = st.selectbox(
-                "Painter Style",
-                PAINTER_STYLES,
-                index=PAINTER_STYLES.index(st.session_state.settings["painter_style"]),
-            )
-        with col2:
-            if st.button("Jackpot!"):
-                import random
-                style = random.choice(PAINTER_STYLES)
-        st.session_state.settings["painter_style"] = style
-
-        st.session_state.settings["model"] = st.selectbox(
-            "Default Model",
-            ALL_MODELS,
-            index=ALL_MODELS.index(st.session_state.settings["model"]),
-        )
-        st.session_state.settings["max_tokens"] = st.number_input(
-            "Default max_tokens",
-            min_value=1000,
-            max_value=120000,
-            value=st.session_state.settings["max_tokens"],
-            step=1000,
-        )
-        st.session_state.settings["temperature"] = st.slider(
-            "Temperature",
-            0.0,
-            1.0,
-            st.session_state.settings["temperature"],
-            0.05,
-        )
-
-        st.markdown("---")
-        st.markdown("### API Keys")
-
-        keys = {}
-
-        if os.getenv("OPENAI_API_KEY"):
-            keys["openai"] = os.getenv("OPENAI_API_KEY")
-            st.caption("OpenAI key from environment.")
-        else:
-            keys["openai"] = st.text_input("OpenAI API Key", type="password")
-
-        if os.getenv("GEMINI_API_KEY"):
-            keys["gemini"] = os.getenv("GEMINI_API_KEY")
-            st.caption("Gemini key from environment.")
-        else:
-            keys["gemini"] = st.text_input("Gemini API Key", type="password")
-
-        if os.getenv("ANTHROPIC_API_KEY"):
-            keys["anthropic"] = os.getenv("ANTHROPIC_API_KEY")
-            st.caption("Anthropic key from environment.")
-        else:
-            keys["anthropic"] = st.text_input("Anthropic API Key", type="password")
-
-        if os.getenv("GROK_API_KEY"):
-            keys["grok"] = os.getenv("GROK_API_KEY")
-            st.caption("Grok key from environment.")
-        else:
-            keys["grok"] = st.text_input("Grok API Key", type="password")
-
-        st.session_state["api_keys"] = keys
-
-        st.markdown("---")
-        st.markdown("### Agents Catalog (agents.yaml)")
-        uploaded_agents = st.file_uploader(
-            "Upload custom agents.yaml",
-            type=["yaml", "yml"],
-            key="sidebar_agents_yaml",
-        )
-        if uploaded_agents is not None:
-            try:
-                cfg = yaml.safe_load(uploaded_agents.read())
-                if "agents" in cfg:
-                    st.session_state["agents_cfg"] = cfg
-                    st.success("Custom agents.yaml loaded for this session.")
-                else:
-                    st.warning("Uploaded YAML has no top-level 'agents' key. Using previous config.")
-            except Exception as e:
-                st.error(f"Failed to parse uploaded YAML: {e}")
-
-# =========================
-# Awesome Dashboard
-# =========================
-
-def render_dashboard():
-    st.title(t("Dashboard"))
-    hist = st.session_state["history"]
-    if not hist:
-        st.info("No runs yet.")
-        return
-
-    df = pd.DataFrame(hist)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Runs", len(df))
-    with col2:
-        st.metric("Unique Tabs", df["tab"].nunique())
-    with col3:
-        st.metric("Approx Tokens Processed", int(df["tokens_est"].sum()))
-
-    # WOW Status Wall (最近一次呼叫)
-    st.markdown("### WOW Status Wall – Latest Activity")
-    last = df.sort_values("ts", ascending=False).iloc[0]
-    wow_color = "linear-gradient(135deg,#22c55e,#16a34a)"  # 綠
-    if last["tokens_est"] > 40000:
-        wow_color = "linear-gradient(135deg,#f97316,#ea580c)"  # 橘
-    if last["tokens_est"] > 80000:
-        wow_color = "linear-gradient(135deg,#ef4444,#b91c1c)"  # 紅
-
-    st.markdown(
-        f"""
-        <div class="wow-card" style="background:{wow_color};">
-          <div class="wow-card-title">LATEST RUN SNAPSHOT</div>
-          <div class="wow-card-main">
-            {last['tab']} · {last['agent']}
-          </div>
-          <div style="margin-top:6px;font-size:0.9rem;">
-            Model: <b>{last['model']}</b> · Tokens ≈ <b>{last['tokens_est']}</b><br>
-            Time (UTC): {last['ts']}
-          </div>
-          <div style="margin-top:8px;">
-            <span class="wow-badge">Status: active</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("### Runs by Tab")
-    chart_tab = alt.Chart(df).mark_bar().encode(
-        x="tab:N",
-        y="count():Q",
-        color="tab:N",
-        tooltip=["tab", "count()"],
-    )
-    st.altair_chart(chart_tab, use_container_width=True)
-
-    st.markdown("### Runs by Model")
-    chart_model = alt.Chart(df).mark_bar().encode(
-        x="model:N",
-        y="count():Q",
-        color="model:N",
-        tooltip=["model", "count()"],
-    )
-    st.altair_chart(chart_model, use_container_width=True)
-
-    # Awesome heatmap: Tab × Model usage
-    st.markdown("### Model × Tab Usage Heatmap")
-    heat_df = df.groupby(["tab", "model"]).size().reset_index(name="count")
-    heatmap = (
-        alt.Chart(heat_df)
-        .mark_rect()
-        .encode(
-            x=alt.X("model:N", title="Model"),
-            y=alt.Y("tab:N", title="Tab"),
-            color=alt.Color("count:Q", scale=alt.Scale(scheme="blues"), title="Runs"),
-            tooltip=["tab", "model", "count"],
-        )
-        .properties(height=260)
-    )
-    st.altair_chart(heatmap, use_container_width=True)
-
-    st.markdown("### Token Usage Over Time")
-    df_time = df.copy()
-    df_time["ts"] = pd.to_datetime(df_time["ts"])
-    chart_time = alt.Chart(df_time).mark_line(point=True).encode(
-        x="ts:T",
-        y="tokens_est:Q",
-        color="tab:N",
-        tooltip=["ts", "tab", "agent", "model", "tokens_est"],
-    )
-    st.altair_chart(chart_time, use_container_width=True)
-
-    st.markdown("### Recent Activity")
-    st.dataframe(df.sort_values("ts", ascending=False).head(25), use_container_width=True)
-
-# =========================
-# Helper for TW application schema
-# =========================
-
-TW_APP_FIELDS = [
-    "doc_no", "e_no", "apply_date", "case_type", "device_category", "case_kind",
-    "origin", "product_class", "similar", "replace_flag", "prior_app_no",
-    "name_zh", "name_en", "indications", "spec_comp",
-    "main_cat", "item_code", "item_name",
-    "uniform_id", "firm_name", "firm_addr",
-    "resp_name", "contact_name", "contact_tel", "contact_fax", "contact_email",
-    "confirm_match", "cert_raps", "cert_ahwp", "cert_other",
-    "manu_type", "manu_name", "manu_country", "manu_addr", "manu_note",
-    "auth_applicable", "auth_desc",
-    "cfs_applicable", "cfs_desc",
-    "qms_applicable", "qms_desc",
-    "similar_info", "labeling_info", "tech_file_info",
-    "preclinical_info", "preclinical_replace",
-    "clinical_just", "clinical_info",
-]
-
-def build_tw_app_dict_from_session() -> dict:
-    s = st.session_state
-    apply_date = s.get("tw_apply_date")
-    apply_date_str = apply_date.strftime("%Y-%m-%d") if apply_date else ""
-    return {
-        "doc_no": s.get("tw_doc_no", ""),
-        "e_no": s.get("tw_e_no", ""),
-        "apply_date": apply_date_str,
-        "case_type": s.get("tw_case_type", ""),
-        "device_category": s.get("tw_device_category", ""),
-        "case_kind": s.get("tw_case_kind", ""),
-        "origin": s.get("tw_origin", ""),
-        "product_class": s.get("tw_product_class", ""),
-        "similar": s.get("tw_similar", ""),
-        "replace_flag": s.get("tw_replace_flag", ""),
-        "prior_app_no": s.get("tw_prior_app_no", ""),
-        "name_zh": s.get("tw_dev_name_zh", ""),
-        "name_en": s.get("tw_dev_name_en", ""),
-        "indications": s.get("tw_indications", ""),
-        "spec_comp": s.get("tw_spec_comp", ""),
-        "main_cat": s.get("tw_main_cat", ""),
-        "item_code": s.get("tw_item_code", ""),
-        "item_name": s.get("tw_item_name", ""),
-        "uniform_id": s.get("tw_uniform_id", ""),
-        "firm_name": s.get("tw_firm_name", ""),
-        "firm_addr": s.get("tw_firm_addr", ""),
-        "resp_name": s.get("tw_resp_name", ""),
-        "contact_name": s.get("tw_contact_name", ""),
-        "contact_tel": s.get("tw_contact_tel", ""),
-        "contact_fax": s.get("tw_contact_fax", ""),
-        "contact_email": s.get("tw_contact_email", ""),
-        "confirm_match": bool(s.get("tw_confirm_match", False)),
-        "cert_raps": bool(s.get("tw_cert_raps", False)),
-        "cert_ahwp": bool(s.get("tw_cert_ahwp", False)),
-        "cert_other": s.get("tw_cert_other", ""),
-        "manu_type": s.get("tw_manu_type", ""),
-        "manu_name": s.get("tw_manu_name", ""),
-        "manu_country": s.get("tw_manu_country", ""),
-        "manu_addr": s.get("tw_manu_addr", ""),
-        "manu_note": s.get("tw_manu_note", ""),
-        "auth_applicable": s.get("tw_auth_app", ""),
-        "auth_desc": s.get("tw_auth_desc", ""),
-        "cfs_applicable": s.get("tw_cfs_app", ""),
-        "cfs_desc": s.get("tw_cfs_desc", ""),
-        "qms_applicable": s.get("tw_qms_app", ""),
-        "qms_desc": s.get("tw_qms_desc", ""),
-        "similar_info": s.get("tw_similar_info", ""),
-        "labeling_info": s.get("tw_labeling_info", ""),
-        "tech_file_info": s.get("tw_tech_file_info", ""),
-        "preclinical_info": s.get("tw_preclinical_info", ""),
-        "preclinical_replace": s.get("tw_preclinical_replace", ""),
-        "clinical_just": s.get("tw_clinical_app", ""),
-        "clinical_info": s.get("tw_clinical_info", ""),
+DEFAULT_AGENTS_CATALOG = {
+    "agents": {
+        "pdf_to_markdown_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 12000,
+            "temperature": 0.2,
+            "system_prompt": "You convert extracted PDF text into clean, well-structured Markdown. Preserve headings, lists, tables when possible. Do not hallucinate content.",
+            "user_prompt": "Convert the following text into Markdown. If you see page headers/footers, remove them. Keep section titles and numbering.",
+        },
+        "tw_screen_review_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 14000,
+            "temperature": 0.2,
+            "system_prompt": "You are a TFDA pre-screening reviewer. You check completeness, consistency, and missing attachments. Be strict and actionable.",
+            "user_prompt": "Perform a TFDA pre-screening review. Output: (1) Key issues (must-fix), (2) Nice-to-have improvements, (3) Completeness checklist table with status and remarks.",
+        },
+        "tw_app_doc_helper": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 14000,
+            "temperature": 0.2,
+            "system_prompt": "You are a regulatory technical writer. Improve structure and clarity without changing facts. Mark missing info as ※待補.",
+            "user_prompt": "Rewrite the application draft into clear, consistent Traditional Chinese Markdown suitable for a submission draft.",
+        },
+        "fda_510k_intel_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 16000,
+            "temperature": 0.2,
+            "system_prompt": "You are an FDA 510(k) intelligence analyst. Be careful about uncertainty. Provide citations where sources are given.",
+            "user_prompt": "Create a 510(k) intelligence memo based on the provided inputs. Include: device overview, potential predicates, relevant guidance/standards, key questions, and a checklist.",
+        },
+        "note_organizer_agent": {
+            "model": "gpt-4o-mini",
+            "max_tokens": 8000,
+            "temperature": 0.2,
+            "system_prompt": "You are an expert note organizer. Produce organized Markdown with headings, bullets, action items, and highlight keywords with <span class=\"kw-coral\">...</span>.",
+            "user_prompt": "Transform the note into organized Markdown. Add a short keyword list at top. Highlight important keywords in coral using span class kw-coral.",
+        },
+        # Guidance workspace agents
+        "guidance_analyze_research_agent": {
+            "model": "gemini-3-flash-preview",
+            "max_tokens": 24000,
+            "temperature": 0.2,
+            "system_prompt": "You are a senior medical device regulatory researcher. You MUST ground claims in provided excerpts and retrieved sources. If external retrieval is unavailable, say so and provide a verification checklist.",
+            "user_prompt": "Generate a 2000–3000 word grounded regulatory research report in the requested language, using citations and a complete source library.",
+        },
+        "template_report_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 18000,
+            "temperature": 0.2,
+            "system_prompt": "You fit an existing report into a provided template while preserving meaning and citation tags.",
+            "user_prompt": "Rewrite the report to match the template exactly. Preserve citations like [S1], [G-p12], etc.",
+        },
+        "skill_md_generator_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 16000,
+            "temperature": 0.2,
+            "system_prompt": "You are creating a SKILL.md in the standard skill format. Write the entire content in the specified language. Include 3 WOW behaviors: Auto-Crosswalk Builder, Citation Quality Gate, Checklist-to-Actions Converter.",
+            "user_prompt": "Create a skill.md that defines a new agent skill for generating comprehensive medical device guidance based on the structure of the provided guidance and reports. Use standard skill-creator format.",
+        },
+        "grounding_inspector_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 8000,
+            "temperature": 0.2,
+            "system_prompt": "You are a grounding inspector. Identify uncited claims and ambiguous or outdated references. Provide a fix list.",
+            "user_prompt": "Inspect the document for grounding issues. Output: (1) uncited claims list, (2) ambiguous language list, (3) outdated references risk, (4) suggested fixes.",
+        },
+        "knowledge_graph_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 8000,
+            "temperature": 0.2,
+            "system_prompt": "Extract a compact knowledge graph as JSON triples. Be faithful to the text; do not invent nodes.",
+            "user_prompt": "Extract a knowledge graph from the document as JSON with keys: nodes[], edges[] where edges are {source, relation, target, evidence_excerpt, citations[]}.",
+        },
+        "bilingual_renderer_agent": {
+            "model": "gemini-2.5-flash",
+            "max_tokens": 12000,
+            "temperature": 0.2,
+            "system_prompt": "You translate while preserving Markdown structure and tables. Do not change meaning. Keep citations intact.",
+            "user_prompt": "Render a bilingual version: preserve headings and table alignment. Keep citations unchanged.",
+        },
     }
+}
 
-def apply_tw_app_dict_to_session(data: dict):
-    # 將標準化 dict 寫入 session_state，以更新表單
-    s = st.session_state
-    s["tw_doc_no"] = data.get("doc_no", "")
-    s["tw_e_no"] = data.get("e_no", "")
-    # 日期
-    from datetime import date
+
+def load_agents_catalog_from_disk() -> Optional[Dict[str, Any]]:
+    if yaml is None:
+        return None
+    for path in ["agents.yaml", "agents.yml"]:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                if isinstance(data, dict) and "agents" in data and isinstance(data["agents"], dict):
+                    return data
+            except Exception:
+                return None
+    return None
+
+
+def ensure_agents_catalog() -> None:
+    if "agents_cfg" not in st.session_state:
+        disk = load_agents_catalog_from_disk()
+        st.session_state["agents_cfg"] = disk or DEFAULT_AGENTS_CATALOG
+
+
+# -----------------------------
+# Retrieval (FDA + web fallback)
+# -----------------------------
+
+@dataclass
+class SourceItem:
+    source_id: str
+    title: str
+    url: str
+    publisher: str
+    doc_no: str
+    date: str
+    accessed: str
+    snippet: str
+    relevance: str
+    kind: str  # e.g., "510k", "guidance", "standard", "user_url", "offline"
+
+
+def can_web_retrieve() -> bool:
+    if requests is None:
+        return False
+    return bool(st.session_state.get("guidance", {}).get("enable_web", False)) and not bool(
+        st.session_state.get("guidance", {}).get("offline_mode", False)
+    )
+
+
+def openfda_510k_by_product_code(product_code: str, limit: int = 5) -> List[SourceItem]:
+    if not (requests and product_code):
+        return []
+    url = "https://api.fda.gov/device/510k.json"
+    params = {"search": f"product_code:{product_code}", "limit": str(limit)}
     try:
-        if data.get("apply_date"):
-            y, m, d = map(int, str(data["apply_date"]).split("-"))
-            s["tw_apply_date"] = date(y, m, d)
+        r = requests.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
     except Exception:
-        pass
-    s["tw_case_type"] = data.get("case_type", "")
-    s["tw_device_category"] = data.get("device_category", "")
-    s["tw_case_kind"] = data.get("case_kind", "")
-    s["tw_origin"] = data.get("origin", "")
-    s["tw_product_class"] = data.get("product_class", "")
-    s["tw_similar"] = data.get("similar", "")
-    s["tw_replace_flag"] = data.get("replace_flag", "")
-    s["tw_prior_app_no"] = data.get("prior_app_no", "")
-    s["tw_dev_name_zh"] = data.get("name_zh", "")
-    s["tw_dev_name_en"] = data.get("name_en", "")
-    s["tw_indications"] = data.get("indications", "")
-    s["tw_spec_comp"] = data.get("spec_comp", "")
-    s["tw_main_cat"] = data.get("main_cat", "")
-    s["tw_item_code"] = data.get("item_code", "")
-    s["tw_item_name"] = data.get("item_name", "")
-    s["tw_uniform_id"] = data.get("uniform_id", "")
-    s["tw_firm_name"] = data.get("firm_name", "")
-    s["tw_firm_addr"] = data.get("firm_addr", "")
-    s["tw_resp_name"] = data.get("resp_name", "")
-    s["tw_contact_name"] = data.get("contact_name", "")
-    s["tw_contact_tel"] = data.get("contact_tel", "")
-    s["tw_contact_fax"] = data.get("contact_fax", "")
-    s["tw_contact_email"] = data.get("contact_email", "")
-    s["tw_confirm_match"] = bool(data.get("confirm_match", False))
-    s["tw_cert_raps"] = bool(data.get("cert_raps", False))
-    s["tw_cert_ahwp"] = bool(data.get("cert_ahwp", False))
-    s["tw_cert_other"] = data.get("cert_other", "")
-    s["tw_manu_type"] = data.get("manu_type", "")
-    s["tw_manu_name"] = data.get("manu_name", "")
-    s["tw_manu_country"] = data.get("manu_country", "")
-    s["tw_manu_addr"] = data.get("manu_addr", "")
-    s["tw_manu_note"] = data.get("manu_note", "")
-    s["tw_auth_app"] = data.get("auth_applicable", "")
-    s["tw_auth_desc"] = data.get("auth_desc", "")
-    s["tw_cfs_app"] = data.get("cfs_applicable", "")
-    s["tw_cfs_desc"] = data.get("cfs_desc", "")
-    s["tw_qms_app"] = data.get("qms_applicable", "")
-    s["tw_qms_desc"] = data.get("qms_desc", "")
-    s["tw_similar_info"] = data.get("similar_info", "")
-    s["tw_labeling_info"] = data.get("labeling_info", "")
-    s["tw_tech_file_info"] = data.get("tech_file_info", "")
-    s["tw_preclinical_info"] = data.get("preclinical_info", "")
-    s["tw_preclinical_replace"] = data.get("preclinical_replace", "")
-    s["tw_clinical_app"] = data.get("clinical_just", "")
-    s["tw_clinical_info"] = data.get("clinical_info", "")
-
-def standardize_tw_app_info_with_llm(raw_obj) -> dict:
-    """
-    使用 LLM 將任意 JSON/欄位對映成標準 TFDA 申請書 schema。
-    需要 Gemini API (預設使用 gemini-2.5-flash)。
-    """
-    api_keys = st.session_state.get("api_keys", {})
-    model = "gemini-2.5-flash"
-    if "gemini" not in api_keys and not os.getenv("GEMINI_API_KEY"):
-        raise RuntimeError("No Gemini API key available for standardizing application info.")
-
-    raw_json = json.dumps(raw_obj, ensure_ascii=False, indent=2)
-    fields_str = ", ".join(TW_APP_FIELDS)
-
-    system_prompt = f"""
-You are a data normalization assistant for a Taiwanese TFDA medical device premarket application.
-
-Goal:
-Map arbitrary JSON or CSV-like key/value structures into a STANDARD JSON object
-that uses EXACTLY the following top-level keys (all strings except where noted):
-
-{fields_str}
-
-Rules:
-- Output MUST be a single JSON object (no markdown, no comments).
-- Every key above MUST appear in the JSON.
-- If information for a field is clearly not present, set it to an empty string,
-  or for boolean-like fields use `false`.
-- Map semantically similar keys (e.g. 'device_name_zh', 'cn_name') to 'name_zh', etc.
-- `apply_date` should be string like 'YYYY-MM-DD' if you can infer; otherwise empty string.
-- Do NOT invent new facts; just reorganize/rename what exists.
-"""
-
-    user_prompt = f"Here is the raw data to normalize:\n\n{raw_json}"
-
-    out = call_llm(
-        model=model,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        max_tokens=4000,
-        temperature=0.1,
-        api_keys=api_keys,
-    )
-
-    # 嘗試 parse JSON
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        # 嘗試截斷到第一個/最後一個大括號
-        start = out.find("{")
-        end = out.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            data = json.loads(out[start:end + 1])
-        else:
-            raise RuntimeError("LLM did not return valid JSON for application info.")
-    if not isinstance(data, dict):
-        raise RuntimeError("Standardized application info is not a JSON object.")
-    # 確保所有欄位存在
-    for k in TW_APP_FIELDS:
-        if k not in data:
-            data[k] = "" if k not in ("confirm_match", "cert_raps", "cert_ahwp") else False
-    return data
-
-def compute_tw_app_completeness() -> float:
-    """
-    計算 TFDA 申請書基本必填欄位的完成度 (0~1)
-    """
-    s = st.session_state
-    required_keys = [
-        "tw_e_no", "tw_case_type", "tw_device_category",
-        "tw_origin", "tw_product_class",
-        "tw_dev_name_zh", "tw_dev_name_en",
-        "tw_uniform_id", "tw_firm_name", "tw_firm_addr",
-        "tw_resp_name", "tw_contact_name", "tw_contact_tel",
-        "tw_contact_email",
-        "tw_manu_name", "tw_manu_addr",
-    ]
-    filled = 0
-    for k in required_keys:
-        v = s.get(k, "")
-        if isinstance(v, str):
-            if v.strip():
-                filled += 1
-        else:
-            if v:
-                filled += 1
-    return filled / len(required_keys) if required_keys else 0.0
-
-# =========================
-# TW Premarket Tab
-# =========================
-
-def render_tw_premarket_tab():
-    """臺灣第二、三等級醫療器材查驗登記 – 預審/形式審查 Tab"""
-    st.title(t("TW Premarket"))
-
-    st.markdown(
-        """
-        <div style="background:#eef2ff;border-radius:12px;padding:10px 14px;
-                    border:1px solid #c7d2fe;margin-bottom:0.75rem;">
-          <b>Step 1.</b> 線上填寫或由 JSON/CSV 匯入「第二、三等級醫療器材查驗登記申請」主要欄位。<br>
-          <b>Step 2.</b> 貼上或上傳「預審/形式審查指引」供 AI 進行完整性檢核。<br>
-          <b>Step 3.</b> 產出預審摘要報告 (Markdown)，可在頁面上修改。<br>
-          <b>Step 4.</b> 以 AI 協助編修申請書內容，或把輸出串接到下一個 agent。
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # -----------------------------
-    # Import / Export Application Info (CSV / JSON)
-    # -----------------------------
-    st.markdown("### Application Info 匯入 / 匯出 (JSON / CSV)")
-
-    col_ie1, col_ie2 = st.columns(2)
-    with col_ie1:
-        st.markdown("**上傳 Application Info**")
-        app_file = st.file_uploader(
-            "Upload Application Info (JSON / CSV)",
-            type=["json", "csv"],
-            key="tw_app_upload",
-        )
-        if app_file is not None:
-            try:
-                if app_file.name.lower().endswith(".json"):
-                    raw_data = json.load(app_file)
-                else:
-                    df = pd.read_csv(app_file)
-                    if len(df) == 0:
-                        st.error("CSV 檔案為空。")
-                        raw_data = None
-                    else:
-                        raw_data = df.to_dict(orient="records")[0]
-                if raw_data is not None:
-                    # 檢查是否已是標準格式
-                    if isinstance(raw_data, dict) and all(k in raw_data for k in TW_APP_FIELDS):
-                        standardized = raw_data
-                    else:
-                        with st.spinner("使用 LLM 將欄位轉為標準 TFDA 申請書格式..."):
-                            standardized = standardize_tw_app_info_with_llm(raw_data)
-                    apply_tw_app_dict_to_session(standardized)
-                    st.success("已將上傳資料轉換並套用至申請表單。")
-                    st.session_state["tw_app_last_loaded"] = standardized
-                    st.experimental_rerun()
-            except Exception as e:
-                st.error(f"上傳或標準化失敗：{e}")
-
-    with col_ie2:
-        st.markdown("**下載 Application Info**")
-        app_dict = build_tw_app_dict_from_session()
-        # JSON
-        json_bytes = json.dumps(app_dict, ensure_ascii=False, indent=2).encode("utf-8")
-        st.download_button(
-            "Download JSON",
-            data=json_bytes,
-            file_name="tw_premarket_application.json",
-            mime="application/json",
-            key="tw_app_download_json",
-        )
-        # CSV
-        df_app = pd.DataFrame([app_dict])
-        csv_bytes = df_app.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name="tw_premarket_application.csv",
-            mime="text/csv",
-            key="tw_app_download_csv",
-        )
-
-    # JSON 預覽
-    if "tw_app_last_loaded" in st.session_state:
-        st.markdown("**最近載入/標準化之 Application JSON 預覽**")
-        st.json(st.session_state["tw_app_last_loaded"], expanded=False)
-
-    st.markdown("---")
-
-    # -----------------------------
-    # WOW Application Status Indicator
-    # -----------------------------
-    completeness = compute_tw_app_completeness()
-    pct = int(completeness * 100)
-    if pct >= 80:
-        card_grad = "linear-gradient(135deg,#22c55e,#16a34a)"
-        txt = "申請基本欄位完成度高，適合進行預審。"
-    elif pct >= 50:
-        card_grad = "linear-gradient(135deg,#f97316,#ea580c)"
-        txt = "部分關鍵欄位仍待補齊，建議補足後再送預審。"
-    else:
-        card_grad = "linear-gradient(135deg,#ef4444,#b91c1c)"
-        txt = "多數基本欄位尚未填寫，請先充實申請資訊。"
-
-    st.markdown(
-        f"""
-        <div class="wow-card" style="background:{card_grad};margin-top:0;">
-          <div class="wow-card-title">APPLICATION COMPLETENESS</div>
-          <div class="wow-card-main">{pct}%</div>
-          <div style="margin-top:6px;font-size:0.9rem;">{txt}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.progress(completeness)
-
-    # -----------------------------
-    # Step 1 – 線上申請書草稿
-    # -----------------------------
-    st.markdown("### Step 1 – 線上填寫申請書（草稿）")
-
-    if "tw_app_status" not in st.session_state:
-        st.session_state["tw_app_status"] = "pending"
-    show_status("申請書填寫", st.session_state["tw_app_status"])
-
-    # 一、案件基本資料
-    st.markdown("#### 一、案件基本資料")
-    col_a1, col_a2, col_a3 = st.columns(3)
-    with col_a1:
-        doc_no = st.text_input("公文文號", key="tw_doc_no")
-        e_no = st.text_input("電子流水號", value=st.session_state.get("tw_e_no", "MDE"), key="tw_e_no")
-    with col_a2:
-        apply_date = st.date_input("申請日", key="tw_apply_date")
-        case_type = st.selectbox(
-            "案件類型*",
-            ["一般申請案", "同一產品不同品名", "專供外銷", "許可證有效期限屆至後六個月內重新申請"],
-            key="tw_case_type",
-        )
-    with col_a3:
-        device_category = st.selectbox(
-            "醫療器材類型*",
-            ["一般醫材", "體外診斷器材(IVD)"],
-            key="tw_device_category",
-        )
-        case_kind = st.selectbox("案件種類*", ["新案", "變更案", "展延案"], index=0, key="tw_case_kind")
-
-    col_a4, col_a5, col_a6 = st.columns(3)
-    with col_a4:
-        origin = st.selectbox("產地*", ["國產", "輸入", "陸輸"], key="tw_origin")
-    with col_a5:
-        product_class = st.selectbox("產品等級*", ["第二等級", "第三等級"], key="tw_product_class")
-    with col_a6:
-        similar = st.selectbox("有無類似品*", ["有", "無", "全球首創"], key="tw_similar")
-
-    col_a7, col_a8 = st.columns(2)
-    with col_a7:
-        replace_flag = st.radio(
-            "是否勾選「替代臨床前測試及原廠品質管制資料」？*",
-            ["否", "是"],
-            index=0 if st.session_state.get("tw_replace_flag", "否") == "否" else 1,
-            key="tw_replace_flag",
-        )
-    with col_a8:
-        prior_app_no = st.text_input("（非首次申請）前次申請案號", key="tw_prior_app_no")
-
-    # 二、醫療器材基本資訊
-    st.markdown("#### 二、醫療器材基本資訊")
-    col_b1, col_b2 = st.columns(2)
-    with col_b1:
-        name_zh = st.text_input("醫療器材中文名稱*", key="tw_dev_name_zh")
-        name_en = st.text_input("醫療器材英文名稱*", key="tw_dev_name_en")
-    with col_b2:
-        indications = st.text_area("效能、用途或適應症說明", value=st.session_state.get("tw_indications", "詳如核定之中文說明書"), key="tw_indications")
-        spec_comp = st.text_area("型號、規格或主要成分說明", value=st.session_state.get("tw_spec_comp", "詳如核定之中文說明書"), key="tw_spec_comp")
-
-    st.markdown("**分類分級品項（依《醫療器材分類分級管理辦法》附表填列）**")
-    col_b3, col_b4, col_b5 = st.columns(3)
-    with col_b3:
-        main_cat = st.selectbox(
-            "主類別",
-            [
-                "",
-                "A.臨床化學及臨床毒理學",
-                "B.血液學及病理學",
-                "C.免疫學及微生物學",
-                "D.麻醉學",
-                "E.心臟血管醫學",
-                "F.牙科學",
-                "G.耳鼻喉科學",
-                "H.胃腸病科學及泌尿科學",
-                "I.一般及整形外科手術",
-                "J.一般醫院及個人使用裝置",
-                "K.神經科學",
-                "L.婦產科學",
-                "M.眼科學",
-                "N.骨科學",
-                "O.物理醫學科學",
-                "P.放射學科學",
-            ],
-            key="tw_main_cat",
-        )
-    with col_b4:
-        item_code = st.text_input("分級品項代碼（例：A.1225）", key="tw_item_code")
-    with col_b5:
-        item_name = st.text_input("分級品項名稱（例：肌氨酸酐試驗系統）", key="tw_item_name")
-
-    # 三、醫療器材商資料
-    st.markdown("#### 三、醫療器材商資料")
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        uniform_id = st.text_input("統一編號*", key="tw_uniform_id")
-        firm_name = st.text_input("醫療器材商名稱*", key="tw_firm_name")
-        firm_addr = st.text_area("醫療器材商地址*", height=80, key="tw_firm_addr")
-    with col_c2:
-        resp_name = st.text_input("負責人姓名*", key="tw_resp_name")
-        contact_name = st.text_input("聯絡人姓名*", key="tw_contact_name")
-        contact_tel = st.text_input("電話*", key="tw_contact_tel")
-        contact_fax = st.text_input("聯絡人傳真", key="tw_contact_fax")
-        contact_email = st.text_input("電子郵件*", key="tw_contact_email")
-
-    confirm_match = st.checkbox(
-        "我已確認上述資料與最新版醫療器材商證照資訊(名稱、地址、負責人)相符",
-        key="tw_confirm_match",
-    )
-
-    st.markdown("**其它佐證（承辦人訓練證明等）**")
-    col_c3, col_c4 = st.columns(2)
-    with col_c3:
-        cert_raps = st.checkbox("RAPS", key="tw_cert_raps")
-        cert_ahwp = st.checkbox("AHWP", key="tw_cert_ahwp")
-    with col_c4:
-        cert_other = st.text_input("其它，請敘明", key="tw_cert_other")
-
-    # 四、製造廠資訊
-    st.markdown("#### 四、製造廠資訊（含委託製造）")
-    manu_type = st.radio(
-        "製造方式",
-        ["單一製造廠", "全部製程委託製造", "委託非全部製程之製造/包裝/貼標/滅菌及最終驗放"],
-        index=0,
-        key="tw_manu_type",
-    )
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        manu_name = st.text_input("製造廠名稱*", key="tw_manu_name")
-        manu_country = st.selectbox(
-            "製造國別*",
-            [
-                "TAIWAN， ROC",
-                "UNITED STATES",
-                "EU (Member State)",
-                "JAPAN",
-                "CHINA",
-                "KOREA， REPUBLIC OF",
-                "OTHER",
-            ],
-            key="tw_manu_country",
-        )
-    with col_d2:
-        manu_addr = st.text_area("製造廠地址*", height=80, key="tw_manu_addr")
-        manu_note = st.text_area("製造廠相關說明（如(O)/(P)製造、委託範圍）", height=80, key="tw_manu_note")
-
-    with st.expander("附件摘要：原廠授權、出產國製售證明、QMS/QSD、技術檔案、臨床資料等", expanded=False):
-        auth_applicable = st.selectbox("原廠授權登記書", ["不適用", "適用"], key="tw_auth_app")
-        auth_desc = st.text_area("原廠授權登記書資料說明", height=80, key="tw_auth_desc")
-
-        cfs_applicable = st.selectbox("出產國製售證明", ["不適用", "適用"], key="tw_cfs_app")
-        cfs_desc = st.text_area("出產國製售證明資料說明", height=80, key="tw_cfs_desc")
-
-        qms_applicable = st.selectbox("QMS/QSD", ["不適用", "適用"], key="tw_qms_app")
-        qms_desc = st.text_area("QMS/QSD 資料說明（含案號、登錄狀態）", height=80, key="tw_qms_desc")
-
-        similar_info = st.text_area(
-            "類似品與比較表摘要（如無類似品則說明理由）",
-            height=80,
-            key="tw_similar_info",
-        )
-        labeling_info = st.text_area(
-            "標籤、說明書或包裝擬稿重點",
-            height=100,
-            key="tw_labeling_info",
-        )
-        tech_file_info = st.text_area(
-            "產品結構、材料、規格、性能、用途、圖樣等技術檔案摘要",
-            height=120,
-            key="tw_tech_file_info",
-        )
-        preclinical_info = st.text_area(
-            "臨床前測試 & 原廠品質管制檢驗摘要（生物相容性、電氣安全、EMC、滅菌、安定性、功能測試、軟體確效等）",
-            height=140,
-            key="tw_preclinical_info",
-        )
-        preclinical_replace = st.text_area(
-            "如本案適用「替代臨床前測試及原廠品質管制資料」之說明",
-            height=100,
-            key="tw_preclinical_replace",
-        )
-        clinical_just = st.selectbox("臨床證據是否適用？", ["不適用", "適用"], key="tw_clinical_app")
-        clinical_info = st.text_area(
-            "臨床證據摘要（研究報告、臨床評估、臨床試驗、FDA/歐盟核定資料等）",
-            height=140,
-            key="tw_clinical_info",
-        )
-
-    # 產生申請書 Markdown
-    if st.button("生成申請書 Markdown 草稿", key="tw_generate_md_btn"):
-        missing = []
-        if not e_no.strip():
-            missing.append("電子流水號")
-        if not case_type.strip():
-            missing.append("案件類型")
-        if not device_category.strip():
-            missing.append("醫療器材類型")
-        if not origin.strip():
-            missing.append("產地")
-        if not product_class.strip():
-            missing.append("產品等級")
-        if not name_zh.strip():
-            missing.append("醫療器材中文名稱")
-        if not name_en.strip():
-            missing.append("醫療器材英文名稱")
-        if not uniform_id.strip():
-            missing.append("統一編號")
-        if not firm_name.strip():
-            missing.append("醫療器材商名稱")
-        if not firm_addr.strip():
-            missing.append("醫療器材商地址")
-        if not resp_name.strip():
-            missing.append("負責人姓名")
-        if not contact_name.strip():
-            missing.append("聯絡人姓名")
-        if not contact_tel.strip():
-            missing.append("電話")
-        if not contact_email.strip():
-            missing.append("電子郵件")
-        if not manu_name.strip():
-            missing.append("製造廠名稱")
-        if not manu_addr.strip():
-            missing.append("製造廠地址")
-
-        if missing:
-            st.warning("以下基本欄位尚未填寫完整（形式檢查）：\n- " + "\n- ".join(missing))
-            st.session_state["tw_app_status"] = "error"
-        else:
-            st.session_state["tw_app_status"] = "done"
-
-        apply_date_str = apply_date.strftime("%Y-%m-%d") if apply_date else ""
-
-        app_md = f"""# 第二、三等級醫療器材查驗登記申請書（線上草稿）
-
-## 一、案件基本資料
-- 公文文號：{doc_no or "（未填）"}
-- 電子流水號：{e_no or "（未填）"}
-- 申請日：{apply_date_str or "（未填）"}
-- 案件類型：{case_type}
-- 醫療器材類型：{device_category}
-- 案件種類：{case_kind}
-- 產地：{origin}
-- 產品等級：{product_class}
-- 有無類似品：{similar}
-- 是否勾選「替代臨床前測試及原廠品質管制資料」：{replace_flag}
-- 前次申請案號（如適用）：{prior_app_no or "不適用"}
-
-## 二、醫療器材基本資訊
-- 中文名稱：{name_zh}
-- 英文名稱：{name_en}
-- 效能、用途或適應症說明：{indications}
-- 型號、規格或主要成分：{spec_comp}
-
-### 分類分級品項
-- 主類別：{main_cat or "（未填）"}
-- 分級品項代碼：{item_code or "（未填）"}
-- 分級品項名稱：{item_name or "（未填）"}
-
-## 三、醫療器材商資料
-- 統一編號：{uniform_id}
-- 醫療器材商名稱：{firm_name}
-- 地址：{firm_addr}
-- 負責人姓名：{resp_name}
-- 聯絡人姓名：{contact_name}
-- 電話：{contact_tel}
-- 傳真：{contact_fax or "（未填）"}
-- 電子郵件：{contact_email}
-- 已確認與最新醫療器材商證照資訊相符：{"是" if confirm_match else "否"}
-
-### 其它佐證
-- RAPS：{"有" if cert_raps else "無"}
-- AHWP：{"有" if cert_ahwp else "無"}
-- 其它訓練/證書：{cert_other or "無"}
-
-## 四、製造廠資訊
-- 製造方式：{manu_type}
-- 製造廠名稱：{manu_name}
-- 製造國別：{manu_country}
-- 製造廠地址：{manu_addr}
-- 製造相關說明：{manu_note or "（未填）"}
-
-## 五～七、原廠授權、出產國製售證明、QMS/QSD
-- 原廠授權登記書適用性：{auth_applicable}
-- 原廠授權登記書資料說明：{auth_desc or "（未填）"}
-- 出產國製售證明適用性：{cfs_applicable}
-- 出產國製售證明資料說明：{cfs_desc or "（未填）"}
-- QMS/QSD 適用性：{qms_applicable}
-- QMS/QSD 資料說明：{qms_desc or "（未填）"}
-
-## 十～十二、類似品、標籤/說明書擬稿、產品技術檔案摘要
-### 類似品相關資訊
-{similar_info or "（未填）"}
-
-### 標籤／說明書／包裝擬稿重點
-{labeling_info or "（未填）"}
-
-### 產品結構、材料、規格、性能、用途、圖樣等技術檔案摘要
-{tech_file_info or "（未填）"}
-
-## 十三～十七、特定安全性要求與臨床前測試及品質管制資料
-### 臨床前測試與原廠品質管制資料摘要
-{preclinical_info or "（未填）"}
-
-### 替代「臨床前測試及原廠品質管制資料」之說明
-{preclinical_replace or "（未填）"}
-
-## 十八、臨床證據資料
-- 臨床證據適用性：{clinical_just}
-- 臨床證據摘要：
-{clinical_info or "（未填）"}
-"""
-        st.session_state["tw_app_markdown"] = app_md
-
-    st.markdown("##### 申請書 Markdown（可編輯）")
-    app_md_current = st.session_state.get("tw_app_markdown", "")
-    app_view_mode = st.radio(
-        "申請書檢視模式", ["Markdown", "純文字"],
-        horizontal=True, key="tw_app_viewmode",
-    )
-    if app_view_mode == "Markdown":
-        app_md_edited = st.text_area(
-            "申請書內容",
-            value=app_md_current,
-            height=320,
-            key="tw_app_md_edited",
-        )
-    else:
-        app_md_edited = st.text_area(
-            "申請書內容（純文字）",
-            value=app_md_current,
-            height=320,
-            key="tw_app_txt_edited",
-        )
-    st.session_state["tw_app_effective_md"] = app_md_edited
-
-    st.markdown("---")
-
-    # Step 2 – 預審指引
-    st.markdown("### Step 2 – 輸入預審/形式審查指引（Screen Review Guidance）")
-
-    col_g1, col_g2 = st.columns(2)
-    with col_g1:
-        guidance_file = st.file_uploader(
-            "上傳預審指引 (PDF / TXT / MD)",
-            type=["pdf", "txt", "md"],
-            key="tw_guidance_file",
-        )
-        guidance_text_from_file = ""
-        if guidance_file is not None:
-            suffix = guidance_file.name.lower().rsplit(".", 1)[-1]
-            if suffix == "pdf":
-                guidance_text_from_file = extract_pdf_pages_to_text(guidance_file, 1, 9999)
-            else:
-                guidance_text_from_file = guidance_file.read().decode("utf-8", errors="ignore")
-    with col_g2:
-        guidance_text_manual = st.text_area(
-            "或直接貼上預審/形式審查指引文字或 Markdown",
-            height=200,
-            key="tw_guidance_manual",
-        )
-
-    guidance_text = guidance_text_from_file or guidance_text_manual
-    st.session_state["tw_guidance_text"] = guidance_text
-
-    if guidance_text:
-        st.success("已載入預審/形式審查指引文字。")
-    else:
-        st.info("尚未提供預審指引。可先填寫申請書草稿，稍後再補。")
-
-    st.markdown("---")
-
-    # Step 3 – 形式審查 / 完整性檢核
-    st.markdown("### Step 3 – 形式審查 / 完整性檢核（Agent）")
-
-    if "tw_app_effective_md" not in st.session_state or not st.session_state["tw_app_effective_md"].strip():
-        st.warning("尚未產生申請書 Markdown。請先於 Step 1 填寫並點擊「生成申請書 Markdown 草稿」。")
-        return
-
-    base_app_md = st.session_state.get("tw_app_effective_md", "")
-    base_guidance = st.session_state.get("tw_guidance_text", "")
-
-    combined_input = f"""=== 申請書草稿（Markdown） ===
-{base_app_md}
-
-=== 預審 / 形式審查指引（文字/Markdown） ===
-{base_guidance or "（尚未提供指引，請依一般法規常規進行形式檢核）"}
-"""
-
-    default_screen_prompt = """你是一位熟悉臺灣「第二、三等級醫療器材查驗登記」的形式審查(預審)審查員。
-
-請根據：
-1. 上述「申請書草稿（Markdown）」內容
-2. 上述「預審 / 形式審查指引」(如有)
-
-執行下列任務，並以 **繁體中文 Markdown** 輸出預審報告：
-
-1. 形式完整性檢核
-   - 建立一個表格，逐一列出本案應檢附的主要文件類別（例如：申請書、醫療器材商許可執照、原廠授權登記書、出產國製售證明、QMS/QSD、標籤/說明書擬稿、產品技術檔案、臨床前測試資料、臨床證據資料等）。
-   - 對每一項，標示：
-     - 「預期應附？」（是/否/不明）
-     - 「申請書中是否有提及？」（有/疑似有/未見）
-     - 「整體判定」（足夠/可能不足/明顯缺漏）
-     - 「備註說明」（請具體指出缺漏內容或需補充重點）。
-
-2. 重要欄位檢核
-   - 針對案件基本資料（案件類型、產地、產品等級、有無類似品、替代條款勾選與否）、醫療器材名稱與分類分級品項、醫療器材商與製造廠資訊等，檢查是否有明顯未填或矛盾之處。
-   - 若有，請以條列方式說明「問題項目」、「疑慮說明」、「建議申請人補充之資料」。
-
-3. 預審評語摘要
-   - 撰寫一段約 300–600 字的預審評語摘要，說明：
-     - 本案送件資料整體完整性評估（例如：資料大致齊全 / 某些關鍵附件可能不足 / 明顯缺少核心技術與臨床資料…）。
-     - 建議申請人下一步應補充或澄清之項目（可分成「必須補件」與「建議補充」）。
-
-4. 請盡量避免臆測未提及之資料；若無從判斷，請明確註記「依現有輸入無法判斷」。
-"""
-
-    st.info(
-        "此處預設使用 agents.yaml 中的 `tw_screen_review_agent`。"
-        "若 agents.yaml 中尚未定義，可先用 fallback system_prompt（即上方 Prompt 文字）。"
-    )
-
-    agent_run_ui(
-        agent_id="tw_screen_review_agent",
-        tab_key="tw_screen",
-        default_prompt=default_screen_prompt,
-        default_input_text=combined_input,
-        allow_model_override=True,
-        tab_label_for_history="TW Premarket Screen Review",
-    )
-
-    st.markdown("---")
-
-    # Step 4 – AI 協助編修申請書內容
-    st.markdown("### Step 4 – AI 協助編修申請書內容")
-
-    helper_default_prompt = """你是一位協助臺灣醫療器材查驗登記申請人的文件撰寫助手。
-
-請在 **不改變實際技術與法規內容** 的前提下，針對以下「申請書草稿（Markdown）」：
-
-1. 優化段落結構與標題層級，使其更符合主管機關常見文件格式。
-2. 修正文句中的明顯語病或不通順處，但不得自行新增未出現在原文的重要技術/臨床資訊。
-3. 如有明顯資訊不足之處，可以在文件中以「※待補：...」標註提醒，供申請人後續補充。
-4. 保持輸出為 Markdown。
-"""
-
-    agent_run_ui(
-        agent_id="tw_app_doc_helper",
-        tab_key="tw_app_helper",
-        default_prompt=helper_default_prompt,
-        default_input_text=st.session_state.get("tw_app_effective_md", ""),
-        allow_model_override=True,
-        tab_label_for_history="TW Application Doc Helper",
-    )
-
-# =========================
-# 510(k) Tab
-# =========================
-
-def render_510k_tab():
-    st.title(t("510k_tab"))
-    col1, col2 = st.columns(2)
-    with col1:
-        device_name = st.text_input("Device Name")
-        k_number = st.text_input("510(k) Number (e.g., K123456)")
-    with col2:
-        sponsor = st.text_input("Sponsor / Manufacturer (optional)")
-        product_code = st.text_input("Product Code (optional)")
-    extra_info = st.text_area("Additional context (indications, technology, etc.)")
-
-    default_prompt = f"""
-You are assisting an FDA 510(k) reviewer.
-
-Task:
-1. Summarize the publicly available information (or emulate such) for:
-   - Device: {device_name}
-   - 510(k) number: {k_number}
-   - Sponsor: {sponsor}
-   - Product code: {product_code}
-2. Produce a detailed, review-oriented summary (about 2000–3000 words).
-3. Provide several markdown tables (e.g., device overview, indications, performance testing, risks).
-
-Language: {st.session_state.settings["language"]}.
-"""
-    combined_input = f"""
-=== Device Inputs ===
-Device name: {device_name}
-510(k) number: {k_number}
-Sponsor: {sponsor}
-Product code: {product_code}
-
-Additional context:
-{extra_info}
-"""
-    agent_run_ui(
-        agent_id="fda_510k_intel_agent",
-        tab_key="510k",
-        default_prompt=default_prompt,
-        default_input_text=combined_input,
-        tab_label_for_history="510(k) Intelligence",
-    )
-
-# =========================
-# PDF → Markdown Tab
-# =========================
-
-def render_pdf_to_md_tab():
-    st.title(t("PDF → Markdown"))
-
-    uploaded = st.file_uploader(
-        "Upload PDF to convert selected pages to Markdown",
-        type=["pdf"],
-        key="pdf_to_md_uploader",
-    )
-    if uploaded:
-        col1, col2 = st.columns(2)
-        with col1:
-            num_start = st.number_input("From page", min_value=1, value=1, key="pdf_to_md_from")
-        with col2:
-            num_end = st.number_input("To page", min_value=1, value=5, key="pdf_to_md_to")
-
-        if st.button("Extract Text", key="pdf_to_md_extract_btn"):
-            text = extract_pdf_pages_to_text(uploaded, int(num_start), int(num_end))
-            st.session_state["pdf_raw_text"] = text
-
-    raw_text = st.session_state.get("pdf_raw_text", "")
-    if raw_text:
-        default_prompt = f"""
-You are converting part of a regulatory PDF into markdown.
-
-- Goal: produce clean, structured markdown preserving headings, lists,
-  and tables (as markdown tables) as much as reasonably possible.
-- Do not hallucinate content that is not in the text.
-
-Language: {st.session_state.settings["language"]}.
-"""
-        agent_run_ui(
-            agent_id="pdf_to_markdown_agent",
-            tab_key="pdf_to_md",
-            default_prompt=default_prompt,
-            default_input_text=raw_text,
-            tab_label_for_history="PDF → Markdown",
-        )
-    else:
-        st.info("Upload a PDF and click 'Extract Text' to begin.")
-
-# =========================
-# 510(k) Review Pipeline Tab
-# =========================
-
-def render_510k_review_pipeline_tab():
-    st.title(t("Checklist & Report"))
-
-    st.markdown("### Step 1 – 提交資料 → 結構化 Markdown")
-    raw_subm = st.text_area(
-        "Paste 510(k) submission material (text/markdown)",
-        height=200,
-        key="subm_paste",
-    )
-    default_subm_prompt = """You are a 510(k) submission organizer.
-
-Restructure the following content into organized markdown with sections such as:
-- Device & submitter information
-- Device description and technology
-- Indications for use
-- Predicate/comparator information
-- Performance testing
-- Risks and risk controls
-
-Do not invent new facts; only reorganize and clarify.
-"""
-    if st.button("Structure Submission", key="subm_run_btn"):
-        if not raw_subm.strip():
-            st.warning("Please paste submission material first.")
-        else:
-            api_keys = st.session_state.get("api_keys", {})
-            try:
-                out = call_llm(
-                    model=st.session_state.settings["model"],
-                    system_prompt="You structure a 510(k) submission.",
-                    user_prompt=default_subm_prompt + "\n\n=== SUBMISSION ===\n" + raw_subm,
-                    max_tokens=st.session_state.settings["max_tokens"],
-                    temperature=0.15,
-                    api_keys=api_keys,
-                )
-                st.session_state["subm_struct_md"] = out
-                token_est = int(len(raw_subm + out) / 4)
-                log_event("510(k) Review Pipeline", "Submission Structurer", st.session_state.settings["model"], token_est)
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    subm_md = st.session_state.get("subm_struct_md", "")
-    if subm_md:
-        st.markdown("#### Structured Submission (editable)")
-        st.text_area("Submission (Markdown)", value=subm_md, height=220, key="subm_struct_md_edited")
-    else:
-        st.info("Structured submission will appear here.")
-
-    st.markdown("---")
-    st.markdown("### Step 2 – Checklist（貼上或由其它 Agent 產生） & Step 3 – Review Report")
-
-    chk_md = st.text_area(
-        "Paste checklist (markdown or text)",
-        height=200,
-        key="chk_md",
-    )
-
-    if st.button("Build Review Report", key="rep_run_btn"):
-        if not subm_md or not chk_md.strip():
-            st.warning("Need both structured submission and checklist.")
-        else:
-            api_keys = st.session_state.get("api_keys", {})
-            rep_prompt = """You are drafting an internal FDA 510(k) review memo.
-
-Using the checklist and structured submission, write a concise review report with:
-- Introduction & scope
-- Device and submission overview
-- Summary of key differences vs. predicate(s)
-- Checklist-based assessment (use headings or tables)
-- Overall conclusion and recommendations.
-"""
-            user_prompt = (
-                rep_prompt
-                + "\n\n=== CHECKLIST ===\n"
-                + chk_md
-                + "\n\n=== STRUCTURED SUBMISSION ===\n"
-                + subm_md
-            )
-            try:
-                out = call_llm(
-                    model=st.session_state.settings["model"],
-                    system_prompt="You are an FDA 510(k) reviewer.",
-                    user_prompt=user_prompt,
-                    max_tokens=st.session_state.settings["max_tokens"],
-                    temperature=0.18,
-                    api_keys=api_keys,
-                )
-                st.session_state["rep_md"] = out
-                token_est = int(len(user_prompt + out) / 4)
-                log_event("510(k) Review Pipeline", "Review Memo Builder", st.session_state.settings["model"], token_est)
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    rep_md = st.session_state.get("rep_md", "")
-    if rep_md:
-        st.markdown("#### Review Report (editable)")
-        st.text_area("Review Report (Markdown)", value=rep_md, height=260, key="rep_md_edited")
-
-# =========================
-# Note Keeper & Magics
-# =========================
-
-def highlight_keywords(text: str, keywords: list[str], color: str) -> str:
-    if not text or not keywords:
-        return text
-    out = text
-    for kw in sorted(set([k for k in keywords if k.strip()]), key=len, reverse=True):
-        safe_kw = kw.strip()
-        if not safe_kw:
-            continue
-        span = f'<span style="color:{color};font-weight:600;">{safe_kw}</span>'
-        out = out.replace(safe_kw, span)
+        return []
+
+    out = []
+    results = data.get("results", []) or []
+    for i, item in enumerate(results, start=1):
+        k = item.get("k_number", "") or ""
+        dev = item.get("device_name", "") or item.get("openfda", {}).get("device_name", "")
+        date = item.get("decision_date", "") or item.get("date_received", "") or ""
+        sponsor = item.get("applicant", "") or ""
+        # openFDA doesn't always provide a canonical summary URL; cite the endpoint and key fields
+        out.append(SourceItem(
+            source_id=f"S510K{i}",
+            title=f"openFDA 510(k) record: {k} — {dev}".strip(" —"),
+            url=f"{url}?search=product_code:{product_code}&limit={limit}",
+            publisher="FDA (openFDA)",
+            doc_no=k or "",
+            date=date or "",
+            accessed=now_iso(),
+            snippet=f"Sponsor: {sponsor}. Product code: {product_code}.",
+            relevance="Potential predicate / comparable cleared device signals.",
+            kind="510k",
+        ))
     return out
 
 
-def render_note_keeper_tab():
-    st.title(t("Note Keeper & Magics"))
-
-    st.markdown("### Step 1 – Paste Notes & Transform to Structured Markdown")
-    raw_notes = st.text_area("Paste your notes (text or markdown)", height=220, key="notes_raw")
-
-    col_n1, col_n2 = st.columns(2)
-    with col_n1:
-        note_model = st.selectbox(
-            "Model for Note → Markdown",
-            ALL_MODELS,
-            index=ALL_MODELS.index(st.session_state.settings["model"]),
-            key="note_model",
-        )
-    with col_n2:
-        note_max_tokens = st.number_input(
-            "max_tokens",
-            min_value=2000,
-            max_value=120000,
-            value=12000,
-            step=1000,
-            key="note_max_tokens",
-        )
-
-    default_note_prompt = """你是一位協助醫療器材/510(k)/TFDA 審查員整理個人筆記的助手。
-
-請將下列雜亂或半結構化的筆記，整理成：
-
-1. 清晰的 Markdown 結構（標題、子標題、條列）。
-2. 保留所有技術與法規重點，不要憑空新增內容。
-3. 顯示出：
-   - 關鍵技術要點
-   - 主要風險與疑問
-   - 待釐清/追問事項
-"""
-    note_struct_prompt = st.text_area(
-        "Prompt for Note → Markdown",
-        value=default_note_prompt,
-        height=180,
-        key="note_struct_prompt",
-    )
-
-    if st.button("Transform notes to structured Markdown", key="note_run_btn"):
-        if not raw_notes.strip():
-            st.warning("Please paste notes first.")
-        else:
-            api_keys = st.session_state.get("api_keys", {})
-            user_prompt = note_struct_prompt + "\n\n=== RAW NOTES ===\n" + raw_notes
-            try:
-                out = call_llm(
-                    model=note_model,
-                    system_prompt="You organize reviewer's notes into clean markdown.",
-                    user_prompt=user_prompt,
-                    max_tokens=note_max_tokens,
-                    temperature=0.15,
-                    api_keys=api_keys,
-                )
-                st.session_state["note_md"] = out
-                token_est = int(len(user_prompt + out) / 4)
-                log_event("Note Keeper", "Note Structurer", note_model, token_est)
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    note_md = st.session_state.get("note_md", raw_notes)
-    st.markdown("#### Structured Note (editable)")
-    note_view = st.radio(
-        "View mode for base note", ["Markdown", "Plain text"],
-        horizontal=True, key="note_view_mode",
-    )
-    if note_view == "Markdown":
-        note_md_edited = st.text_area(
-            "Note (Markdown)",
-            value=note_md,
-            height=260,
-            key="note_md_edited",
-        )
-    else:
-        note_md_edited = st.text_area(
-            "Note (Plain text)",
-            value=note_md,
-            height=260,
-            key="note_txt_edited",
-        )
-    st.session_state["note_effective"] = note_md_edited
-
-    base_note = st.session_state.get("note_effective", "")
-
-    # Magic 1 – AI Formatting
-    st.markdown("---")
-    st.markdown("### Magic 1 – AI Formatting")
-
-    fmt_model = st.selectbox(
-        "Model (Formatting)",
-        ALL_MODELS,
-        index=ALL_MODELS.index(st.session_state.settings["model"]),
-        key="fmt_model",
-    )
-    fmt_prompt = st.text_area(
-        "Prompt for AI Formatting",
-        value="請在不改變內容的前提下，統一標題層級與條列格式，讓此筆記更易讀（輸出 Markdown）。",
-        height=120,
-        key="fmt_prompt",
-    )
-
-    if st.button("Run AI Formatting", key="fmt_run_btn"):
-        if not base_note.strip():
-            st.warning("No base note available.")
-        else:
-            api_keys = st.session_state.get("api_keys", {})
-            user_prompt = fmt_prompt + "\n\n=== NOTE ===\n" + base_note
-            try:
-                out = call_llm(
-                    model=fmt_model,
-                    system_prompt="You are a formatting-only assistant for markdown notes.",
-                    user_prompt=user_prompt,
-                    max_tokens=12000,
-                    temperature=0.1,
-                    api_keys=api_keys,
-                )
-                st.session_state["fmt_note"] = out
-                token_est = int(len(user_prompt + out) / 4)
-                log_event("Note Keeper", "AI Formatting", fmt_model, token_est)
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    fmt_note = st.session_state.get("fmt_note", "")
-    if fmt_note:
-        st.text_area(
-            "Formatted Note (Markdown)",
-            value=fmt_note,
-            height=220,
-            key="fmt_note_edited",
-        )
-
-    # Magic 2 – AI Keywords (Manual highlight)
-    st.markdown("---")
-    st.markdown("### Magic 2 – AI Keywords (Manual highlight)")
-
-    kw_input = st.text_input(
-        "Keywords (comma-separated)",
-        key="kw_input",
-        value="510(k), TFDA, QMS, biocompatibility",
-    )
-    kw_color = st.color_picker("Color for keywords", "#ff7f50", key="kw_color")
-
-    if st.button("Apply Keyword Highlighting", key="kw_run_btn"):
-        if not base_note.strip():
-            st.warning("No base note available.")
-        else:
-            keywords = [k.strip() for k in kw_input.split(",") if k.strip()]
-            highlighted = highlight_keywords(base_note, keywords, kw_color)
-            st.session_state["kw_note"] = highlighted
-
-    kw_note = st.session_state.get("kw_note", "")
-    if kw_note:
-        st.markdown("#### Note with Highlighted Keywords (Markdown rendering)")
-        st.markdown(kw_note, unsafe_allow_html=True)
-
-    # Magic 3 – AI Summary
-    st.markdown("---")
-    st.markdown("### Magic 3 – AI Summary")
-
-    sum_model = st.selectbox(
-        "Model (Summary)",
-        ALL_MODELS,
-        index=ALL_MODELS.index("gpt-4o-mini") if "gpt-4o-mini" in ALL_MODELS else 0,
-        key="note_sum_model",
-    )
-    sum_prompt = st.text_area(
-        "Prompt for Summary",
-        value="請將以下審查筆記摘要為 5–10 個重點 bullet，並附上一段 3–5 句的整體摘要（使用繁體中文）。",
-        height=150,
-        key="note_sum_prompt",
-    )
-    if st.button("Run AI Summary", key="note_sum_run_btn"):
-        if not base_note.strip():
-            st.warning("No base note available.")
-        else:
-            api_keys = st.session_state.get("api_keys", {})
-            user_prompt = sum_prompt + "\n\n=== NOTE ===\n" + base_note
-            try:
-                out = call_llm(
-                    model=sum_model,
-                    system_prompt="You write executive-style regulatory summaries.",
-                    user_prompt=user_prompt,
-                    max_tokens=12000,
-                    temperature=0.2,
-                    api_keys=api_keys,
-                )
-                st.session_state["note_summary"] = out
-                token_est = int(len(user_prompt + out) / 4)
-                log_event("Note Keeper", "AI Summary", sum_model, token_est)
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    note_summary = st.session_state.get("note_summary", "")
-    if note_summary:
-        st.text_area(
-            "Summary",
-            value=note_summary,
-            height=200,
-            key="note_summary_edited",
-        )
-
-    # Magic 4 – AI Action Items
-    st.markdown("---")
-    st.markdown("### Magic 4 – AI Action Items")
-
-    act_model = st.selectbox(
-        "Model (Action Items)",
-        ALL_MODELS,
-        index=ALL_MODELS.index(st.session_state.settings["model"]),
-        key="note_act_model",
-    )
-    act_prompt = st.text_area(
-        "Prompt for Action Items",
-        value="請從以下筆記中萃取需要後續行動的事項（補件、澄清、內部會議等），並以 Markdown 表格輸出：項目、負責人(可留空)、優先順序、說明。",
-        height=150,
-        key="note_act_prompt",
-    )
-    if st.button("Run AI Action Items", key="note_act_run_btn"):
-        if not base_note.strip():
-            st.warning("No base note available.")
-        else:
-            api_keys = st.session_state.get("api_keys", {})
-            user_prompt = act_prompt + "\n\n=== NOTE ===\n" + base_note
-            try:
-                out = call_llm(
-                    model=act_model,
-                    system_prompt="You extract action items from regulatory review notes.",
-                    user_prompt=user_prompt,
-                    max_tokens=12000,
-                    temperature=0.2,
-                    api_keys=api_keys,
-                )
-                st.session_state["note_actions"] = out
-                token_est = int(len(user_prompt + out) / 4)
-                log_event("Note Keeper", "AI Action Items", act_model, token_est)
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    note_actions = st.session_state.get("note_actions", "")
-    if note_actions:
-        st.text_area(
-            "Action Items",
-            value=note_actions,
-            height=220,
-            key="note_actions_edited",
-        )
-
-    # Magic 5 – AI Glossary
-    st.markdown("---")
-    st.markdown("### Magic 5 – AI Glossary (術語表)")
-
-    glo_model = st.selectbox(
-        "Model (Glossary)",
-        ALL_MODELS,
-        index=ALL_MODELS.index("gemini-2.5-flash") if "gemini-2.5-flash" in ALL_MODELS else 0,
-        key="note_glo_model",
-    )
-    glo_prompt = st.text_area(
-        "Prompt for Glossary",
-        value="請從以下筆記中找出重要專有名詞 (英文縮寫、標準、指引文件名稱、專業術語)，製作 Markdown 表格：Term, Full Name/Chinese, Explanation。",
-        height=150,
-        key="note_glo_prompt",
-    )
-    if st.button("Run AI Glossary", key="note_glo_run_btn"):
-        if not base_note.strip():
-            st.warning("No base note available.")
-        else:
-            api_keys = st.session_state.get("api_keys", {})
-            user_prompt = glo_prompt + "\n\n=== NOTE ===\n" + base_note
-            try:
-                out = call_llm(
-                    model=glo_model,
-                    system_prompt="You build glossaries for regulatory/technical notes.",
-                    user_prompt=user_prompt,
-                    max_tokens=12000,
-                    temperature=0.2,
-                    api_keys=api_keys,
-                )
-                st.session_state["note_glossary"] = out
-                token_est = int(len(user_prompt + out) / 4)
-                log_event("Note Keeper", "AI Glossary", glo_model, token_est)
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    note_glossary = st.session_state.get("note_glossary", "")
-    if note_glossary:
-        st.text_area(
-            "Glossary",
-            value=note_glossary,
-            height=220,
-            key="note_glossary_edited",
-        )
-
-# =========================
-# Agents Config Tab
-# =========================
-
-def render_agents_config_tab():
-    st.title(t("Agents Config"))
-
-    agents_cfg = st.session_state["agents_cfg"]
-    agents_dict = agents_cfg.get("agents", {})
-
-    st.subheader("1. Current Agents Overview")
-    if not agents_dict:
-        st.warning("No agents found in current agents.yaml.")
-    else:
-        df = pd.DataFrame(
-            [
-                {
-                    "agent_id": aid,
-                    "name": acfg.get("name", ""),
-                    "model": acfg.get("model", ""),
-                    "category": acfg.get("category", ""),
-                }
-                for aid, acfg in agents_dict.items()
-            ]
-        )
-        st.dataframe(df, use_container_width=True, height=260)
-
-    st.markdown("---")
-    st.subheader("2. Edit Full agents.yaml (raw text)")
-
-    yaml_str_current = yaml.dump(
-        st.session_state["agents_cfg"],
-        allow_unicode=True,
-        sort_keys=False,
-    )
-    edited_yaml_text = st.text_area(
-        "agents.yaml (editable)",
-        value=yaml_str_current,
-        height=320,
-        key="agents_yaml_text_editor",
-    )
-
-    col_a1, col_a2, col_a3 = st.columns(3)
-    with col_a1:
-        if st.button("Apply edited YAML to session", key="apply_edited_yaml"):
-            try:
-                cfg = yaml.safe_load(edited_yaml_text)
-                if not isinstance(cfg, dict) or "agents" not in cfg:
-                    st.error("Parsed YAML does not contain top-level key 'agents'. No changes applied.")
-                else:
-                    st.session_state["agents_cfg"] = cfg
-                    st.success("Updated agents.yaml in current session.")
-            except Exception as e:
-                st.error(f"Failed to parse edited YAML: {e}")
-
-    with col_a2:
-        uploaded_agents_tab = st.file_uploader(
-            "Upload agents.yaml file",
-            type=["yaml", "yml"],
-            key="agents_yaml_tab_uploader",
-        )
-        if uploaded_agents_tab is not None:
-            try:
-                cfg = yaml.safe_load(uploaded_agents_tab.read())
-                if "agents" in cfg:
-                    st.session_state["agents_cfg"] = cfg
-                    st.success("Uploaded agents.yaml applied to this session.")
-                else:
-                    st.warning("Uploaded file has no top-level 'agents' key. Ignoring.")
-            except Exception as e:
-                st.error(f"Failed to parse uploaded YAML: {e}")
-
-    with col_a3:
-        st.download_button(
-            "Download current agents.yaml",
-            data=yaml_str_current.encode("utf-8"),
-            file_name="agents.yaml",
-            mime="text/yaml",
-            key="download_agents_yaml_current",
-        )
-
-# =========================
-# Main
-# =========================
-
-st.set_page_config(page_title="Agentic Medical Device Reviewer", layout="wide")
-
-if "settings" not in st.session_state:
-    st.session_state["settings"] = {
-        "theme": "Light",
-        "language": "繁體中文",
-        "painter_style": "Van Gogh",
-        "model": "gpt-4o-mini",
-        "max_tokens": 12000,
-        "temperature": 0.2,
-    }
-if "history" not in st.session_state:
-    st.session_state["history"] = []
-
-# Load agents.yaml or default minimal
-if "agents_cfg" not in st.session_state:
+def duckduckgo_search(query: str, limit: int = 5, site_filter: Optional[str] = None) -> List[Tuple[str, str, str]]:
+    """
+    Very lightweight HTML scrape. If blocked, returns [].
+    Returns list of (title, url, snippet).
+    """
+    if not requests:
+        return []
+    q = query
+    if site_filter:
+        q = f"site:{site_filter} {query}"
     try:
-        with open("agents.yaml", "r", encoding="utf-8") as f:
-            st.session_state["agents_cfg"] = yaml.safe_load(f)
+        r = requests.get("https://duckduckgo.com/html/", params={"q": q}, timeout=20,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        html = r.text
     except Exception:
-        st.session_state["agents_cfg"] = {
-            "agents": {
-                "fda_510k_intel_agent": {
-                    "name": "510(k) Intelligence Agent",
-                    "model": "gpt-4o-mini",
-                    "system_prompt": "You are an FDA 510(k) analyst.",
-                    "max_tokens": 12000,
-                    "category": "FDA 510(k)",
-                },
-                "pdf_to_markdown_agent": {
-                    "name": "PDF to Markdown Agent",
-                    "model": "gemini-2.5-flash",
-                    "system_prompt": "You convert PDF-extracted text into clean markdown.",
-                    "max_tokens": 12000,
-                    "category": "文件前處理",
-                },
-                "tw_screen_review_agent": {
-                    "name": "TFDA 預審形式審查代理",
-                    "model": "gemini-2.5-flash",
-                    "system_prompt": "You are a TFDA premarket screen reviewer.",
-                    "max_tokens": 12000,
-                    "category": "TFDA Premarket",
-                },
-                "tw_app_doc_helper": {
-                    "name": "TFDA 申請書撰寫助手",
-                    "model": "gpt-4o-mini",
-                    "system_prompt": "You help improve TFDA application documents.",
-                    "max_tokens": 12000,
-                    "category": "TFDA Premarket",
-                },
-            }
-        }
+        return []
 
-render_sidebar()
-apply_style(st.session_state.settings["theme"], st.session_state.settings["painter_style"])
+    # Crude parsing: find results links
+    # DuckDuckGo HTML structure can change; keep best-effort and safe.
+    results = []
+    for m in re.finditer(r'<a rel="nofollow" class="result__a" href="([^"]+)">(.+?)</a>', html):
+        url = m.group(1)
+        title = re.sub("<.*?>", "", m.group(2))
+        # snippet near the link (best effort)
+        snippet = ""
+        post = html[m.end(): m.end() + 500]
+        sm = re.search(r'<a class="result__snippet".*?>(.*?)</a>|<div class="result__snippet".*?>(.*?)</div>', post, re.S)
+        if sm:
+            snippet = re.sub("<.*?>", "", (sm.group(1) or sm.group(2) or "")).strip()
+        results.append((title.strip(), url.strip(), snippet))
+        if len(results) >= limit:
+            break
+    return results
 
-tab_labels = [
-    t("Dashboard"),
-    t("TW Premarket"),
-    t("510k_tab"),
-    t("PDF → Markdown"),
-    t("Checklist & Report"),
-    t("Note Keeper & Magics"),
-    t("Agents Config"),
+
+def retrieve_fda_guidance_and_standards(topic: str, limit_each: int = 5) -> List[SourceItem]:
+    """
+    Best-effort retrieval. If web retrieval disabled/unavailable, returns [].
+    """
+    if not can_web_retrieve():
+        return []
+
+    items: List[SourceItem] = []
+    # Guidance
+    guidance_hits = duckduckgo_search(topic + " FDA guidance", limit=limit_each, site_filter="fda.gov")
+    for i, (title, url, snippet) in enumerate(guidance_hits, start=1):
+        items.append(SourceItem(
+            source_id=f"SG{i}",
+            title=title or "FDA guidance (search result)",
+            url=url,
+            publisher="FDA",
+            doc_no="",
+            date="",
+            accessed=now_iso(),
+            snippet=snippet[:400],
+            relevance="Potentially relevant FDA guidance document (verify on access).",
+            kind="guidance",
+        ))
+
+    # Standards (FDA recognized consensus standards database)
+    std_hits = duckduckgo_search(topic + " FDA recognized consensus standards", limit=limit_each, site_filter="fda.gov")
+    for i, (title, url, snippet) in enumerate(std_hits, start=1):
+        items.append(SourceItem(
+            source_id=f"SS{i}",
+            title=title or "FDA recognized standards (search result)",
+            url=url,
+            publisher="FDA",
+            doc_no="",
+            date="",
+            accessed=now_iso(),
+            snippet=snippet[:400],
+            relevance="Potentially relevant standards listing (verify).",
+            kind="standard",
+        ))
+    return items
+
+
+def user_url_sources(urls_text: str) -> List[SourceItem]:
+    urls = []
+    for line in (urls_text or "").splitlines():
+        line = line.strip()
+        if line.startswith("http://") or line.startswith("https://"):
+            urls.append(line)
+    out = []
+    for i, u in enumerate(urls, start=1):
+        out.append(SourceItem(
+            source_id=f"U{i}",
+            title="User-provided reference URL",
+            url=u,
+            publisher="User provided",
+            doc_no="",
+            date="",
+            accessed=now_iso(),
+            snippet="",
+            relevance="User supplied source for grounding.",
+            kind="user_url",
+        ))
+    return out
+
+
+def sources_to_markdown(sources: List[SourceItem], lang: str) -> str:
+    if lang == "English":
+        lines = ["## Source library", ""]
+        for s in sources:
+            lines += [
+                f"- **[{s.source_id}] {s.title}**",
+                f"  - Publisher: {s.publisher}",
+                f"  - Doc No.: {s.doc_no or 'N/A'}",
+                f"  - URL: {s.url or 'N/A'}",
+                f"  - Date: {s.date or 'N/A'}",
+                f"  - Accessed: {s.accessed}",
+                f"  - Relevance: {s.relevance}",
+            ]
+            if s.snippet:
+                lines.append(f"  - Snippet: {s.snippet}")
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+    else:
+        lines = ["## 來源彙整（Source library）", ""]
+        for s in sources:
+            lines += [
+                f"- **[{s.source_id}] {s.title}**",
+                f"  - 發布者：{s.publisher}",
+                f"  - 文件編號：{s.doc_no or 'N/A'}",
+                f"  - 連結：{s.url or 'N/A'}",
+                f"  - 日期：{s.date or 'N/A'}",
+                f"  - 存取時間：{s.accessed}",
+                f"  - 關聯性：{s.relevance}",
+            ]
+            if s.snippet:
+                lines.append(f"  - 摘要：{s.snippet}")
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+
+# -----------------------------
+# File ingestion
+# -----------------------------
+
+def extract_pdf_text(file_bytes: bytes, max_pages: Optional[int] = None) -> Tuple[str, List[Tuple[int, str]]]:
+    """
+    Returns (full_text, page_markers) where page_markers is list of (page_index_1based, page_text).
+    """
+    if PdfReader is None:
+        raise RuntimeError("pypdf not installed; cannot read PDFs.")
+    reader = PdfReader(io.BytesIO(file_bytes))
+    pages = reader.pages
+    n = len(pages)
+    if max_pages is not None:
+        n = min(n, max_pages)
+    full = []
+    markers = []
+    for i in range(n):
+        try:
+            txt = pages[i].extract_text() or ""
+        except Exception:
+            txt = ""
+        txt = txt.strip()
+        markers.append((i + 1, txt))
+        full.append(f"\n\n[PAGE {i+1}]\n{txt}")
+    return "\n".join(full).strip(), markers
+
+
+def read_uploaded_file(uploaded) -> Tuple[str, Dict[str, Any]]:
+    """
+    Returns (text, meta)
+    meta includes: filename, filetype, page_markers (if pdf)
+    """
+    if uploaded is None:
+        return "", {}
+    name = uploaded.name
+    suffix = (name.split(".")[-1] or "").lower()
+    data = uploaded.read()
+
+    meta = {"filename": name, "filetype": suffix, "page_markers": []}
+
+    if suffix == "pdf":
+        txt, markers = extract_pdf_text(data, max_pages=None)
+        meta["page_markers"] = markers
+        return txt, meta
+
+    # text-like
+    try:
+        txt = data.decode("utf-8", errors="replace")
+    except Exception:
+        txt = str(data)
+    return txt, meta
+
+
+# -----------------------------
+# Keyword highlight helper
+# -----------------------------
+
+def highlight_keywords_md(md_text: str, keywords: List[str], color: str = "#ff7f50") -> str:
+    """
+    Wraps keywords in HTML span with inline style color.
+    Uses word-boundary-ish approach; best-effort for CJK too.
+    """
+    if not md_text or not keywords:
+        return md_text
+
+    # Sort longer first to avoid partial overlaps
+    kws = sorted({k.strip() for k in keywords if k.strip()}, key=len, reverse=True)
+    if not kws:
+        return md_text
+
+    # Avoid replacing inside code fences
+    parts = re.split(r"(```.*?```)", md_text, flags=re.S)
+    out_parts = []
+
+    for part in parts:
+        if part.startswith("```") and part.endswith("```"):
+            out_parts.append(part)
+            continue
+        tmp = part
+        for kw in kws:
+            # Case-insensitive for Latin; for CJK it won't matter
+            pattern = re.compile(re.escape(kw), re.IGNORECASE)
+            tmp = pattern.sub(lambda m: f'<span style="color:{color}; font-weight:700;">{m.group(0)}</span>', tmp)
+        out_parts.append(tmp)
+    return "".join(out_parts)
+
+
+# -----------------------------
+# UI Components
+# -----------------------------
+
+def init_session_state() -> None:
+    st.session_state.setdefault("settings", {
+        "theme": "Light",
+        "ui_lang": "繁體中文",
+        "painter_style": "Monet",
+        "default_model": "gpt-4o-mini",
+        "temperature": 0.2,
+        "max_tokens": 12000,
+    })
+    st.session_state.setdefault("api_keys", {})
+    st.session_state.setdefault("history", [])
+    st.session_state.setdefault("wow", {"global_status": "Ready"})
+    st.session_state.setdefault("notes", {
+        "raw": "",
+        "organized": "",
+        "effective": "",
+        "prompt": "",
+        "model": "",
+        "saved_prompts": [],  # list of {title, prompt, model, ts}
+        "magics": {},
+    })
+    st.session_state.setdefault("guidance", {
+        "input_text": "",
+        "input_meta": {},
+        "output_lang": "繁體中文",
+        "offline_mode": False,
+        "enable_web": True,
+        "product_code": "",
+        "device_type": "",
+        "topic_hint": "",
+        "user_urls": "",
+        "sources": [],
+        "stepA_prompt": "",
+        "stepA_model": GEMINI_GUIDANCE_MODELS_STEP_A[0],
+        "stepA_out": "",
+        "stepB_template": "",
+        "stepB_prompt": "",
+        "stepB_model": GEMINI_GUIDANCE_MODELS_STEP_B[0],
+        "stepB_out": "",
+        "stepC_prompt": "",
+        "stepC_model": GEMINI_GUIDANCE_MODELS_STEP_C[0],
+        "skill_md": "",
+        "graph_json": "",
+        "grounding_report": "",
+        "bilingual_other_lang": "English",
+        "bilingual_out": "",
+    })
+    st.session_state.setdefault("agent_studio", {
+        "pipeline": [],  # list of steps: {agent_id, prompt, model, input, output}
+    })
+
+
+def render_sidebar() -> None:
+    s = st.session_state["settings"]
+
+    with st.sidebar:
+        st.markdown(f"### {t('sidebar_settings')}")
+        s["theme"] = st.selectbox(t("theme"), THEMES, index=THEMES.index(s.get("theme", "Light")))
+        s["ui_lang"] = st.selectbox(t("language"), UI_LANGS, index=UI_LANGS.index(s.get("ui_lang", "English")))
+        s["painter_style"] = st.selectbox(t("painter_style"), PAINTER_STYLES,
+                                         index=PAINTER_STYLES.index(s.get("painter_style", "Monet")))
+        cols = st.columns([1, 1])
+        with cols[0]:
+            if st.button(t("jackpot")):
+                s["painter_style"] = random.choice(PAINTER_STYLES)
+                st.session_state["wow"]["global_status"] = "Ready"
+                st.rerun()
+        with cols[1]:
+            st.caption(f"v{APP_VERSION}")
+
+        st.divider()
+        s["default_model"] = st.selectbox(t("default_model"), ALL_MODELS,
+                                         index=ALL_MODELS.index(s.get("default_model", "gpt-4o-mini")))
+        s["temperature"] = st.slider(t("temperature"), 0.0, 1.0, float(s.get("temperature", 0.2)), 0.05)
+        s["max_tokens"] = st.number_input(t("max_tokens"), min_value=256, max_value=120000,
+                                          value=int(s.get("max_tokens", 12000)), step=256)
+
+        st.divider()
+        st.markdown(f"### {t('api_keys')}")
+        for provider in ["openai", "gemini", "anthropic", "grok"]:
+            env_name = ENV_KEYS[provider]
+            env_val = os.getenv(env_name)
+            if env_val:
+                st.markdown(f"- **{provider.upper()}**: `{t('loaded_from_env')}`")
+            else:
+                key_field = st.text_input(f"{provider.upper()} — {t('enter_key')}", type="password",
+                                          value=st.session_state["api_keys"].get(provider, ""))
+                # store (but avoid storing empty)
+                if key_field.strip():
+                    st.session_state["api_keys"][provider] = key_field.strip()
+                else:
+                    # keep missing if user cleared
+                    st.session_state["api_keys"].pop(provider, None)
+                if st.button(f"{provider.upper()} — {t('clear_key')}", key=f"clear_{provider}"):
+                    st.session_state["api_keys"].pop(provider, None)
+                    st.rerun()
+
+        st.divider()
+        st.markdown(f"### {t('agents_catalog')}")
+        if yaml is None:
+            st.warning("PyYAML not installed; agents.yaml upload/editor disabled.")
+        else:
+            up = st.file_uploader(t("upload_agents_yaml"), type=["yaml", "yml"])
+            if up is not None:
+                try:
+                    data = yaml.safe_load(up.read().decode("utf-8", errors="replace"))
+                    if not (isinstance(data, dict) and "agents" in data and isinstance(data["agents"], dict)):
+                        raise ValueError("Invalid agents.yaml format: missing top-level 'agents' dict.")
+                    st.session_state["agents_cfg"] = data
+                    st.success("Loaded agents catalog into session.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to load agents.yaml: {e}")
+
+
+def wow_header() -> None:
+    s = st.session_state["settings"]
+    apply_style(s["theme"], s["painter_style"])
+
+    # Global status display
+    status = st.session_state.get("wow", {}).get("global_status", "Ready")
+    st.markdown(
+        f"""
+        <div class="wow-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+            <div>
+              <div style="font-size:20px; font-weight:800;">{APP_TITLE}</div>
+              <div class="wow-muted">Theme: {s['theme']} · UI: {s['ui_lang']} · Style: {s['painter_style']}</div>
+            </div>
+            <div>{status_chip(status)}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def agent_runner_panel(
+    *,
+    tab_name: str,
+    agent_id: str,
+    default_input: str = "",
+    fixed_models: Optional[List[str]] = None,
+    allow_prompt_edit: bool = True,
+    allow_input_edit: bool = True,
+    key_prefix: str,
+) -> Tuple[str, str]:
+    """
+    Generic agent runner: prompt + model selection + input + output editor.
+    Returns (effective_output, last_status)
+    """
+    ensure_agents_catalog()
+    agents = st.session_state["agents_cfg"]["agents"]
+    cfg = agents.get(agent_id, {})
+
+    st.session_state.setdefault("agent_state", {})
+    state = st.session_state["agent_state"].setdefault(key_prefix, {
+        "status": "Ready",
+        "prompt": cfg.get("user_prompt", ""),
+        "system_prompt": cfg.get("system_prompt", ""),
+        "model": cfg.get("model", st.session_state["settings"]["default_model"]),
+        "max_tokens": int(cfg.get("max_tokens", st.session_state["settings"]["max_tokens"])),
+        "temperature": float(cfg.get("temperature", st.session_state["settings"]["temperature"])),
+        "input": default_input or "",
+        "output": "",
+        "view": "Markdown",
+        "last_duration_ms": 0,
+        "last_tokens_in": 0,
+        "last_tokens_out": 0,
+        "last_provider": "",
+        "last_ts": "",
+    })
+
+    # Sync default input only if user hasn't typed anything yet
+    if default_input and not state.get("input"):
+        state["input"] = default_input
+
+    status = state["status"]
+    st.markdown(
+        f"""
+        <div class="wow-card">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div style="font-weight:800;">Agent: <code>{agent_id}</code></div>
+            <div>{status_chip(status)}</div>
+          </div>
+          <div class="wow-muted">Model: <code>{state['model']}</code> · {t('provider')}: <code>{provider_for_model(state['model'])}</code></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    cols = st.columns([1, 1, 1])
+    with cols[0]:
+        models = fixed_models or ALL_MODELS
+        # ensure model exists in list
+        if state["model"] not in models:
+            models = models + [state["model"]]
+        state["model"] = st.selectbox("Model", models, index=models.index(state["model"]), key=f"{key_prefix}_model")
+    with cols[1]:
+        state["max_tokens"] = st.number_input(t("max_tokens"), 256, 120000, int(state["max_tokens"]),
+                                              step=256, key=f"{key_prefix}_maxtok")
+    with cols[2]:
+        state["temperature"] = st.slider(t("temperature"), 0.0, 1.0, float(state["temperature"]), 0.05,
+                                         key=f"{key_prefix}_temp")
+
+    if allow_prompt_edit:
+        state["system_prompt"] = st.text_area(t("system_prompt"), value=state["system_prompt"], height=120,
+                                              key=f"{key_prefix}_sysp")
+        state["prompt"] = st.text_area(t("prompt"), value=state["prompt"], height=140,
+                                       key=f"{key_prefix}_userp")
+    else:
+        st.caption("Prompt is fixed for this step.")
+        st.code(state["system_prompt"])
+        st.code(state["prompt"])
+
+    if allow_input_edit:
+        state["input"] = st.text_area(t("input"), value=state["input"], height=220, key=f"{key_prefix}_in")
+    else:
+        st.caption("Input is fixed for this step.")
+        st.code(state["input"])
+
+    run_cols = st.columns([1, 1, 2])
+    with run_cols[0]:
+        run_btn = st.button(t("run"), key=f"{key_prefix}_run")
+    with run_cols[1]:
+        state["view"] = st.radio(t("output_view"), [t("markdown"), t("text")], horizontal=True, key=f"{key_prefix}_view")
+    with run_cols[2]:
+        if state.get("last_ts"):
+            st.caption(f"{t('duration')}: {state['last_duration_ms']/1000:.2f}s · {t('tokens_est')}: {state['last_tokens_in']+state['last_tokens_out']} · {state['last_ts']}")
+
+    if run_btn:
+        st.session_state["wow"]["global_status"] = "Running"
+        state["status"] = "Running"
+        st.rerun()
+
+    # Execute if flagged running (two-phase to allow UI refresh)
+    if state["status"] == "Running":
+        start = time.time()
+        provider = provider_for_model(state["model"])
+        user_full = (state["prompt"] or "").strip() + "\n\n---\n\n" + (state["input"] or "").strip()
+
+        tokens_in = approx_tokens((state["system_prompt"] or "") + "\n" + user_full)
+        try:
+            out = call_llm(
+                model=state["model"],
+                system_prompt=state["system_prompt"],
+                user_prompt=user_full,
+                max_tokens=int(state["max_tokens"]),
+                temperature=float(state["temperature"]),
+            )
+            duration_ms = int((time.time() - start) * 1000)
+            tokens_out = approx_tokens(out)
+
+            state["output"] = out
+            state["status"] = "Done"
+            state["last_duration_ms"] = duration_ms
+            state["last_tokens_in"] = tokens_in
+            state["last_tokens_out"] = tokens_out
+            state["last_provider"] = provider
+            state["last_ts"] = now_iso()
+            st.session_state["wow"]["global_status"] = "Ready"
+
+            log_event(
+                tab=tab_name,
+                agent=agent_id,
+                model=state["model"],
+                provider=provider,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                duration_ms=duration_ms,
+            )
+        except Exception as e:
+            state["status"] = "Error"
+            st.session_state["wow"]["global_status"] = "Ready"
+            st.error(f"{t('error')}: {e}")
+
+    # Output editor
+    st.markdown(f"#### {t('output')}")
+    if state["view"] == t("markdown"):
+        # show render + editable raw
+        st.markdown(state["output"] or "")
+        state["output"] = st.text_area("Editable output (Markdown)", value=state["output"], height=260,
+                                       key=f"{key_prefix}_out_md")
+    else:
+        state["output"] = st.text_area("Editable output (Text)", value=state["output"], height=260,
+                                       key=f"{key_prefix}_out_txt")
+
+    return state["output"], state["status"]
+
+
+# -----------------------------
+# Dashboard
+# -----------------------------
+
+def render_dashboard() -> None:
+    st.subheader(t("tabs_dashboard"))
+
+    hist = st.session_state.get("history", [])
+    total_runs = len(hist)
+    uniq_tabs = len(set(h.get("tab") for h in hist))
+    total_tokens = sum(int(h.get("tokens_total_est", 0)) for h in hist)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f"<div class='wow-card'><div class='wow-kpi'>{total_runs}</div><div class='wow-muted'>Total runs</div></div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class='wow-card'><div class='wow-kpi'>{uniq_tabs}</div><div class='wow-muted'>Unique tabs</div></div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"<div class='wow-card'><div class='wow-kpi'>{total_tokens}</div><div class='wow-muted'>Tokens (est.)</div></div>", unsafe_allow_html=True)
+
+    # Latest run status wall
+    if hist:
+        last = max(hist, key=lambda x: x.get("ts", ""))
+        tokens = int(last.get("tokens_total_est", 0))
+        if tokens > 80000:
+            level = "High"
+        elif tokens > 40000:
+            level = "Medium"
+        else:
+            level = "Normal"
+        st.markdown(
+            f"""
+            <div class="wow-card">
+              <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+                <div>
+                  <div style="font-weight:900;">WOW Status Wall</div>
+                  <div class="wow-muted">Last run: <b>{last.get('tab')}</b> · Agent: <code>{last.get('agent')}</code></div>
+                  <div class="wow-muted">Model: <code>{last.get('model')}</code> · Provider: <code>{last.get('provider')}</code></div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-size:22px; font-weight:900;">{level}</div>
+                  <div class="wow-muted">{t('tokens_est')}: {tokens}</div>
+                  <div class="wow-muted">{t('duration')}: {int(last.get('duration_ms',0))/1000:.2f}s</div>
+                </div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    if not hist:
+        st.info("No history yet.")
+        return
+
+    # Charts
+    if pd is None or alt is None:
+        st.warning("pandas/altair not installed; charts disabled.")
+        st.dataframe(hist)
+        return
+
+    df = pd.DataFrame(hist)
+    df["ts_dt"] = pd.to_datetime(df["ts"], errors="coerce")
+
+    st.markdown("### Usage analytics")
+    c1, c2 = st.columns(2)
+    with c1:
+        tab_counts = df.groupby("tab").size().reset_index(name="count")
+        ch = alt.Chart(tab_counts).mark_bar().encode(
+            x=alt.X("tab:N", sort="-y"),
+            y="count:Q",
+            tooltip=["tab:N", "count:Q"],
+        ).properties(height=260)
+        st.altair_chart(ch, use_container_width=True)
+
+    with c2:
+        model_counts = df.groupby("model").size().reset_index(name="count")
+        ch = alt.Chart(model_counts).mark_bar().encode(
+            x=alt.X("model:N", sort="-y"),
+            y="count:Q",
+            tooltip=["model:N", "count:Q"],
+        ).properties(height=260)
+        st.altair_chart(ch, use_container_width=True)
+
+    st.markdown("### Model × Tab heatmap")
+    heat = df.groupby(["tab", "model"]).size().reset_index(name="count")
+    ch = alt.Chart(heat).mark_rect().encode(
+        x=alt.X("model:N", sort=ALL_MODELS),
+        y=alt.Y("tab:N", sort="-x"),
+        color=alt.Color("count:Q", scale=alt.Scale(scheme="blues")),
+        tooltip=["tab:N", "model:N", "count:Q"],
+    ).properties(height=300)
+    st.altair_chart(ch, use_container_width=True)
+
+    st.markdown("### Token usage over time")
+    line = alt.Chart(df).mark_line(point=True).encode(
+        x="ts_dt:T",
+        y="tokens_total_est:Q",
+        color="tab:N",
+        tooltip=["ts:N", "tab:N", "agent:N", "model:N", "tokens_total_est:Q", "duration_ms:Q"],
+    ).properties(height=260)
+    st.altair_chart(line, use_container_width=True)
+
+    st.markdown(f"### {t('history')}")
+    st.dataframe(df.sort_values("ts", ascending=False).head(50), use_container_width=True)
+
+
+# -----------------------------
+# TW Premarket (simplified but complete)
+# -----------------------------
+
+TW_APP_FIELDS = [
+    "doc_no", "e_no", "apply_date",
+    "case_type", "device_category", "case_kind", "origin", "product_class",
+    "name_zh", "name_en", "indications", "spec_comp",
+    "uniform_id", "firm_name", "firm_addr", "resp_name",
+    "contact_name", "contact_tel", "contact_email",
+    "manu_name", "manu_country", "manu_addr",
+    "similar_info", "labeling_info", "tech_file_info",
+    "preclinical_info", "clinical_info",
 ]
-tabs = st.tabs(tab_labels)
 
-with tabs[0]:
-    render_dashboard()
-with tabs[1]:
-    render_tw_premarket_tab()
-with tabs[2]:
-    render_510k_tab()
-with tabs[3]:
-    render_pdf_to_md_tab()
-with tabs[4]:
-    render_510k_review_pipeline_tab()
-with tabs[5]:
-    render_note_keeper_tab()
-with tabs[6]:
-    render_agents_config_tab()
+def tw_key(k: str) -> str:
+    return f"tw_{k}"
+
+
+def tw_init() -> None:
+    for f in TW_APP_FIELDS:
+        st.session_state.setdefault(tw_key(f), "")
+
+    st.session_state.setdefault("tw_guidance_text", "")
+    st.session_state.setdefault("tw_app_markdown", "")
+    st.session_state.setdefault("tw_app_effective_md", "")
+
+
+def compute_tw_completeness() -> float:
+    required = ["e_no", "case_type", "product_class", "name_zh", "indications", "spec_comp", "firm_name", "manu_name"]
+    filled = 0
+    for r in required:
+        if (st.session_state.get(tw_key(r), "") or "").strip():
+            filled += 1
+    return filled / max(1, len(required))
+
+
+def build_tw_app_md() -> str:
+    d = {f: st.session_state.get(tw_key(f), "") for f in TW_APP_FIELDS}
+    md = f"""# TFDA 查驗登記申請草稿（Draft）
+
+## 1. 基本資料
+- 文件編號：{d['doc_no']}
+- 案件編號（E No.）：{d['e_no']}
+- 申請日期：{d['apply_date']}
+- 案件類別：{d['case_type']}
+- 器材類別：{d['device_category']}
+- 分級（Class）：{d['product_class']}
+- 來源：{d['origin']}
+
+## 2. 器材資訊
+- 中文名稱：{d['name_zh']}
+- 英文名稱：{d['name_en']}
+- 適應症/用途：{d['indications']}
+- 規格/組成：{d['spec_comp']}
+
+## 3. 申請/聯絡資訊
+- 統一編號：{d['uniform_id']}
+- 公司名稱：{d['firm_name']}
+- 公司地址：{d['firm_addr']}
+- 負責人：{d['resp_name']}
+- 聯絡人：{d['contact_name']}
+- 電話：{d['contact_tel']}
+- Email：{d['contact_email']}
+
+## 4. 製造廠資訊
+- 製造廠名稱：{d['manu_name']}
+- 國別：{d['manu_country']}
+- 地址：{d['manu_addr']}
+
+## 5. 其他摘要
+- 類似品/等同性：{d['similar_info']}
+- 標示/說明書：{d['labeling_info']}
+- 技術文件摘要：{d['tech_file_info']}
+- 臨床前資料摘要：{d['preclinical_info']}
+- 臨床資料摘要：{d['clinical_info']}
+
+---
+（本文件為系統自動產生草稿，需人工校對。）
+"""
+    return md.strip() + "\n"
+
+
+def render_tw_premarket() -> None:
+    tw_init()
+    st.subheader(t("tabs_tw"))
+
+    comp = compute_tw_completeness()
+    if comp >= 0.8:
+        msg = "High completeness"
+        status = "Done"
+    elif comp >= 0.5:
+        msg = "Medium completeness"
+        status = "Needs review"
+    else:
+        msg = "Low completeness"
+        status = "Blocked"
+
+    st.markdown(
+        f"""
+        <div class="wow-card">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <div style="font-weight:900;">WOW Application Completeness</div>
+              <div class="wow-muted">{msg} · {comp*100:.0f}%</div>
+            </div>
+            <div>{status_chip(status)}</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True
+    )
+    st.progress(comp)
+
+    with st.expander("Application form", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.text_input("E No.", key=tw_key("e_no"))
+            st.text_input("申請日期", key=tw_key("apply_date"))
+            st.text_input("案件類別", key=tw_key("case_type"))
+            st.text_input("器材類別", key=tw_key("device_category"))
+            st.text_input("分級（Class）", key=tw_key("product_class"))
+        with c2:
+            st.text_input("中文名稱", key=tw_key("name_zh"))
+            st.text_input("英文名稱", key=tw_key("name_en"))
+            st.text_area("適應症/用途", key=tw_key("indications"), height=120)
+            st.text_area("規格/組成", key=tw_key("spec_comp"), height=120)
+
+        st.text_input("公司名稱", key=tw_key("firm_name"))
+        st.text_input("製造廠名稱", key=tw_key("manu_name"))
+        st.text_area("類似品/等同性摘要", key=tw_key("similar_info"), height=90)
+        st.text_area("臨床前資料摘要", key=tw_key("preclinical_info"), height=90)
+        st.text_area("臨床資料摘要", key=tw_key("clinical_info"), height=90)
+
+    if st.button("生成申請書 Markdown 草稿"):
+        md = build_tw_app_md()
+        st.session_state["tw_app_markdown"] = md
+        st.session_state["tw_app_effective_md"] = md
+
+    if st.session_state.get("tw_app_markdown"):
+        st.markdown("### Application draft (editable)")
+        st.markdown(st.session_state["tw_app_effective_md"])
+        st.session_state["tw_app_effective_md"] = st.text_area(
+            "Editable markdown",
+            value=st.session_state["tw_app_effective_md"],
+            height=220
+        )
+
+    st.markdown("### Guidance input (optional)")
+    g_up = st.file_uploader("Upload guidance (pdf/txt/md)", type=["pdf", "txt", "md"], key="tw_guid_up")
+    if g_up is not None:
+        txt, _meta = read_uploaded_file(g_up)
+        st.session_state["tw_guidance_text"] = txt
+    st.session_state["tw_guidance_text"] = st.text_area("Or paste guidance text", value=st.session_state["tw_guidance_text"], height=140)
+
+    st.markdown("### Pre-screening review agent")
+    default_in = (st.session_state.get("tw_app_effective_md", "") or "") + "\n\n---\n\n" + (st.session_state.get("tw_guidance_text", "") or "")
+    agent_runner_panel(
+        tab_name="TW Premarket",
+        agent_id="tw_screen_review_agent",
+        default_input=default_in,
+        key_prefix="tw_screen",
+    )
+
+    st.markdown("### Application document helper")
+    agent_runner_panel(
+        tab_name="TW Premarket",
+        agent_id="tw_app_doc_helper",
+        default_input=st.session_state.get("tw_app_effective_md", ""),
+        key_prefix="tw_helper",
+    )
+
+
+# -----------------------------
+# 510(k) Intelligence
+# -----------------------------
+
+def render_510k_intel() -> None:
+    st.subheader(t("tabs_510k_intel"))
+    st.caption("Draft an intelligence memo; add product code if available to improve retrieval in the Guidance workspace.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        device_name = st.text_input("Device name", key="k_device_name")
+        sponsor = st.text_input("Sponsor / applicant", key="k_sponsor")
+    with c2:
+        product_code = st.text_input("Product code (optional)", key="k_product_code")
+        k_number = st.text_input("K number (optional)", key="k_k_number")
+
+    base = f"""Device name: {device_name}
+Sponsor: {sponsor}
+Product code: {product_code}
+K number: {k_number}
+
+Task:
+Create a detailed 510(k) intelligence memo (approx 2000–3000 words if enough info), including: device overview, potential predicate clues, likely guidance and standards, key risks, and a compliance checklist.
+If information is missing, clearly list questions and assumptions.
+"""
+    agent_runner_panel(
+        tab_name="510(k) Intelligence",
+        agent_id="fda_510k_intel_agent",
+        default_input=base,
+        key_prefix="k_intel",
+    )
+
+
+# -----------------------------
+# PDF → Markdown
+# -----------------------------
+
+def render_pdf_to_md() -> None:
+    st.subheader(t("tabs_pdf_md"))
+    up = st.file_uploader("Upload PDF", type=["pdf"])
+    raw = ""
+    meta = {}
+    if up is not None:
+        try:
+            raw, meta = read_uploaded_file(up)
+            st.success(f"Loaded: {meta.get('filename')}")
+        except Exception as e:
+            st.error(f"{t('error')}: {e}")
+
+    if raw:
+        st.markdown("#### Extracted text preview")
+        st.text_area("Preview", value=raw[:4000], height=180)
+
+    agent_runner_panel(
+        tab_name="PDF→Markdown",
+        agent_id="pdf_to_markdown_agent",
+        default_input=raw,
+        key_prefix="pdfmd",
+    )
+
+
+# -----------------------------
+# 510(k) Review Pipeline (simple 2-step)
+# -----------------------------
+
+def render_510k_pipeline() -> None:
+    st.subheader(t("tabs_510k_pipeline"))
+
+    st.markdown("### Step 1 — Structure submission text")
+    st.session_state.setdefault("subm_raw", "")
+    st.session_state.setdefault("subm_struct", "")
+    st.session_state["subm_raw"] = st.text_area("Paste submission content", value=st.session_state["subm_raw"], height=220)
+
+    # Use generic agent runner via a temporary inline agent config
+    ensure_agents_catalog()
+    if "submission_structurer_agent" not in st.session_state["agents_cfg"]["agents"]:
+        st.session_state["agents_cfg"]["agents"]["submission_structurer_agent"] = {
+            "model": st.session_state["settings"]["default_model"],
+            "max_tokens": 12000,
+            "temperature": 0.2,
+            "system_prompt": "You are a 510(k) submission organizer. Produce structured Markdown with clear sections and checklists.",
+            "user_prompt": "Rewrite the content into a well-structured Markdown submission outline with sections and bullet points. Do not invent missing data.",
+        }
+    out1, _ = agent_runner_panel(
+        tab_name="510(k) Review Pipeline",
+        agent_id="submission_structurer_agent",
+        default_input=st.session_state["subm_raw"],
+        key_prefix="pipe_struct",
+    )
+    st.session_state["subm_struct"] = out1
+
+    st.markdown("### Step 2 — Draft review memo + checklist")
+    st.session_state.setdefault("subm_checklist", "")
+    st.session_state["subm_checklist"] = st.text_area("Paste or draft checklist (optional)", value=st.session_state["subm_checklist"], height=160)
+
+    if "review_memo_agent" not in st.session_state["agents_cfg"]["agents"]:
+        st.session_state["agents_cfg"]["agents"]["review_memo_agent"] = {
+            "model": st.session_state["settings"]["default_model"],
+            "max_tokens": 14000,
+            "temperature": 0.2,
+            "system_prompt": "You are an internal FDA reviewer. Be grounded, cautious, and actionable.",
+            "user_prompt": "Create an internal review memo: summary, key issues, standards/guidance, and a checklist table with status and evidence needed.",
+        }
+    combined = (st.session_state.get("subm_struct", "") or "") + "\n\n---\n\nChecklist:\n" + (st.session_state.get("subm_checklist", "") or "")
+    agent_runner_panel(
+        tab_name="510(k) Review Pipeline",
+        agent_id="review_memo_agent",
+        default_input=combined,
+        key_prefix="pipe_memo",
+    )
+
+
+# -----------------------------
+# AI Note Keeper + Magics (6)
+# -----------------------------
+
+def render_notes() -> None:
+    st.subheader(t("tabs_notes"))
+    notes = st.session_state["notes"]
+
+    st.markdown("### Step 1 — Paste note, transform to organized Markdown")
+    notes["raw"] = st.text_area("Paste note (text/markdown)", value=notes.get("raw", ""), height=200)
+
+    # Allow prompt/model selection for organizer
+    ensure_agents_catalog()
+    org_agent = st.session_state["agents_cfg"]["agents"].get("note_organizer_agent", DEFAULT_AGENTS_CATALOG["agents"]["note_organizer_agent"])
+    notes.setdefault("prompt", org_agent.get("user_prompt", ""))
+    notes.setdefault("model", org_agent.get("model", st.session_state["settings"]["default_model"]))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        notes["model"] = st.selectbox("Model", ALL_MODELS, index=ALL_MODELS.index(notes["model"]) if notes["model"] in ALL_MODELS else 0, key="note_model")
+    with c2:
+        if st.button("Organize note"):
+            st.session_state["wow"]["global_status"] = "Running"
+            start = time.time()
+            sys_p = org_agent.get("system_prompt", "")
+            user_p = notes["prompt"] or org_agent.get("user_prompt", "")
+            try:
+                out = call_llm(
+                    model=notes["model"],
+                    system_prompt=sys_p,
+                    user_prompt=(user_p + "\n\n---\n\n" + notes["raw"]),
+                    max_tokens=int(st.session_state["settings"]["max_tokens"]),
+                    temperature=float(st.session_state["settings"]["temperature"]),
+                )
+                duration_ms = int((time.time() - start) * 1000)
+                notes["organized"] = out
+                notes["effective"] = out
+                st.session_state["wow"]["global_status"] = "Ready"
+                log_event("AI Note Keeper", "note_organizer_agent", notes["model"], provider_for_model(notes["model"]),
+                          approx_tokens(sys_p + user_p + notes["raw"]), approx_tokens(out), duration_ms)
+            except Exception as e:
+                st.session_state["wow"]["global_status"] = "Ready"
+                st.error(f"{t('error')}: {e}")
+
+    notes["prompt"] = st.text_area("Organizer prompt (editable)", value=notes.get("prompt", ""), height=140)
+
+    st.markdown("### Organized note (editable)")
+    if notes.get("effective"):
+        st.markdown(notes["effective"], unsafe_allow_html=True)
+    notes["effective"] = st.text_area("Editable organized note (Markdown)", value=notes.get("effective", ""), height=260)
+
+    # Keep prompt with note
+    st.markdown("### Keep prompt with the note")
+    keep_cols = st.columns([2, 2, 1])
+    with keep_cols[0]:
+        title = st.text_input("Saved prompt title", value="Note organizer preset", key="note_preset_title")
+    with keep_cols[1]:
+        if st.button("Save prompt preset"):
+            notes["saved_prompts"].append({"title": title, "prompt": notes["prompt"], "model": notes["model"], "ts": now_iso()})
+            st.success("Saved.")
+    with keep_cols[2]:
+        if st.button(t("reset"), key="note_reset"):
+            st.session_state["notes"] = {
+                "raw": "", "organized": "", "effective": "",
+                "prompt": notes.get("prompt", ""), "model": notes.get("model", ""),
+                "saved_prompts": notes.get("saved_prompts", []),
+                "magics": {},
+            }
+            st.rerun()
+
+    if notes.get("saved_prompts"):
+        with st.expander("Saved prompt presets", expanded=False):
+            for i, p in enumerate(notes["saved_prompts"]):
+                st.write(f"{i+1}. **{p['title']}** — {p['model']} — {p['ts']}")
+                if st.button(f"Load preset {i+1}", key=f"load_preset_{i}"):
+                    notes["prompt"] = p["prompt"]
+                    notes["model"] = p["model"]
+                    st.rerun()
+
+    st.divider()
+    st.markdown("## AI Magics (6)")
+
+    # Shared controls
+    magic_model = st.selectbox("Magic model", ALL_MODELS, index=ALL_MODELS.index(st.session_state["settings"]["default_model"]))
+    base_text = notes.get("effective", "")
+
+    def run_magic(agent_name: str, sys_p: str, user_p: str, payload: str, key_out: str) -> None:
+        start = time.time()
+        try:
+            out = call_llm(
+                model=magic_model,
+                system_prompt=sys_p,
+                user_prompt=user_p + "\n\n---\n\n" + payload,
+                max_tokens=int(st.session_state["settings"]["max_tokens"]),
+                temperature=float(st.session_state["settings"]["temperature"]),
+            )
+            duration_ms = int((time.time() - start) * 1000)
+            notes["magics"][key_out] = out
+            log_event("AI Note Keeper", agent_name, magic_model, provider_for_model(magic_model),
+                      approx_tokens(sys_p + user_p + payload), approx_tokens(out), duration_ms)
+        except Exception as e:
+            st.error(f"{t('error')}: {e}")
+
+    # 1) AI Keywords (custom color)
+    with st.expander("Magic 1 — AI Keywords (custom color)", expanded=False):
+        kw = st.text_input("Keywords (comma-separated)", value="risk,sterilization,biocompatibility,510(k)")
+        color = st.color_picker("Highlight color", value="#ff7f50")
+        if st.button("Apply highlight"):
+            kws = [x.strip() for x in kw.split(",") if x.strip()]
+            notes["effective"] = highlight_keywords_md(notes["effective"], kws, color=color)
+            st.success("Applied.")
+        st.caption("This magic is deterministic (no LLM call).")
+
+    # 2) AI Action Extractor
+    with st.expander("Magic 2 — AI Action Extractor", expanded=False):
+        prompt = st.text_area("Prompt", value="Extract action items into a Markdown table: task | owner(role) | priority | due date | evidence excerpt.", height=120, key="m2p")
+        if st.button("Run Action Extractor"):
+            run_magic("note_magic_action_extractor",
+                      "You extract action items from notes. Be specific and concise.",
+                      prompt, base_text, "m2_out")
+        st.markdown(notes["magics"].get("m2_out", ""))
+
+    # 3) AI Risk Flags
+    with st.expander("Magic 3 — AI Risk Flags", expanded=False):
+        prompt = st.text_area("Prompt", value="Identify regulatory risk flags. Output a table: risk | severity(L/M/H) | why | recommended mitigation | supporting excerpt.", height=120, key="m3p")
+        if st.button("Run Risk Flags"):
+            run_magic("note_magic_risk_flags",
+                      "You identify regulatory risk flags without hallucination; cite excerpts.",
+                      prompt, base_text, "m3_out")
+        st.markdown(notes["magics"].get("m3_out", ""))
+
+    # 4) AI Meeting Minutes Converter
+    with st.expander("Magic 4 — AI Meeting Minutes Converter", expanded=False):
+        prompt = st.text_area("Prompt", value="Convert to formal meeting minutes: attendees, agenda, discussion summary, decisions, next steps.", height=120, key="m4p")
+        if st.button("Run Minutes Converter"):
+            run_magic("note_magic_minutes",
+                      "You produce formal meeting minutes in clean Markdown.",
+                      prompt, base_text, "m4_out")
+        st.markdown(notes["magics"].get("m4_out", ""))
+
+    # 5) AI Compliance Crosswalk
+    with st.expander("Magic 5 — AI Compliance Crosswalk", expanded=False):
+        framework = st.multiselect("Frameworks", ["ISO 13485", "ISO 14971", "IEC 62304", "IEC 62366-1", "ISO 10993", "ISO 11135/11137/17665"], default=["ISO 14971", "ISO 13485"])
+        prompt = st.text_area("Prompt", value="Create a crosswalk mapping note content to the selected frameworks. Output a table with gaps and suggested evidence.", height=120, key="m5p")
+        if st.button("Run Crosswalk"):
+            payload = "Frameworks: " + ", ".join(framework) + "\n\n" + base_text
+            run_magic("note_magic_crosswalk",
+                      "You map content to compliance frameworks and identify gaps. Do not invent evidence.",
+                      prompt, payload, "m5_out")
+        st.markdown(notes["magics"].get("m5_out", ""))
+
+    # 6) AI Diff & Improve
+    with st.expander("Magic 6 — AI Diff & Improve", expanded=False):
+        original = st.text_area("Original note", value=notes.get("raw", ""), height=140)
+        edited = st.text_area("Edited/organized note", value=notes.get("effective", ""), height=140)
+        prompt = st.text_area("Prompt", value="Compare the original vs edited. Suggest clarity improvements while preserving meaning. Output: improvements list + rewritten version (optional).", height=120, key="m6p")
+        if st.button("Run Diff & Improve"):
+            payload = "ORIGINAL:\n" + original + "\n\nEDITED:\n" + edited
+            run_magic("note_magic_diff_improve",
+                      "You compare two notes and propose improvements without changing intent.",
+                      prompt, payload, "m6_out")
+        st.markdown(notes["magics"].get("m6_out", ""))
+
+    st.divider()
+    st.markdown("### Downloads")
+    md = notes.get("effective", "")
+    st.download_button("Download .md", data=md.encode("utf-8"), file_name="note.md", mime="text/markdown")
+    st.download_button("Download .txt", data=re.sub(r"<[^>]+>", "", md).encode("utf-8"), file_name="note.txt", mime="text/plain")
+
+
+# -----------------------------
+# Guidance Reviewer & Research
+# -----------------------------
+
+DEFAULT_REPORT_TEMPLATE_TC = """# （預設模板）醫療器材指引審查報告與審查清單
+
+## 一、審查目的與範圍
+- 器材/主題：
+- 輸入文件：
+- 輸出語言：
+- 重要假設與限制：
+
+## 二、文件重點摘要（含引用）
+（以條列方式列出文件關鍵要求、適用範圍、定義與例外。）
+
+## 三、法規與標準彙整
+### 3.1 FDA（含 guidance / 510(k) / recognized standards）
+### 3.2 國際法規（EU MDR / IMDRF / 其他）
+### 3.3 產業/共識標準（ISO/IEC/ASTM 等）
+
+## 四、差異分析與落地建議
+- 與輸入文件一致處：
+- 潛在落差/風險：
+- 建議補強資料：
+
+## 五、審查清單（Checklist）
+| 審查項目 | 具備文件/證據 | 來源引用 | 狀態（符合/不適用/待補） | 備註 |
+|---|---|---|---|---|
+
+## 六、結論與待釐清問題
+- 審查結論：
+- 待釐清問題清單：
+
+## 附錄：來源彙整（Source library）
+（列出所有引用來源與存取時間）
+"""
+
+DEFAULT_REPORT_TEMPLATE_EN = """# (Default Template) Medical Device Guidance Review Report & Checklist
+
+## 1. Purpose and Scope
+- Device/topic:
+- Input document:
+- Output language:
+- Key assumptions/limitations:
+
+## 2. Key document takeaways (with citations)
+(Bullets capturing scope, definitions, requirements, exceptions.)
+
+## 3. Regulations and standards landscape
+### 3.1 FDA (guidance / 510(k) / recognized consensus standards)
+### 3.2 International regulations (EU MDR / IMDRF / others)
+### 3.3 Industry standards (ISO/IEC/ASTM etc.)
+
+## 4. Gap analysis and practical recommendations
+- Alignments:
+- Potential gaps/risks:
+- Recommended evidence to add:
+
+## 5. Review checklist
+| Item | Expected evidence | Source citation | Status (Meets/NA/Needs work) | Notes |
+|---|---|---|---|---|
+
+## 6. Conclusion and open questions
+- Conclusion:
+- Questions for sponsor:
+
+## Appendix: Source library
+(List all sources with access date)
+"""
+
+
+def render_guidance_workspace() -> None:
+    g = st.session_state["guidance"]
+    st.subheader(t("tabs_guidance"))
+
+    # Controls
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        g["output_lang"] = st.selectbox(t("output_language"), ["繁體中文", "English"],
+                                        index=0 if g.get("output_lang", "繁體中文") == "繁體中文" else 1)
+    with c2:
+        g["offline_mode"] = st.checkbox(t("offline_mode"), value=bool(g.get("offline_mode", False)))
+    with c3:
+        g["enable_web"] = st.checkbox(t("enable_web_retrieval"), value=bool(g.get("enable_web", True)),
+                                      disabled=bool(g.get("offline_mode", False)))
+
+    st.markdown("### " + t("upload_or_paste"))
+    up = st.file_uploader(t("file_upload"), type=["txt", "md", "pdf"], key="guid_up")
+    if up is not None:
+        try:
+            txt, meta = read_uploaded_file(up)
+            g["input_text"] = txt
+            g["input_meta"] = meta
+            st.success(f"Loaded: {meta.get('filename')}")
+        except Exception as e:
+            st.error(f"{t('error')}: {e}")
+
+    g["input_text"] = st.text_area(t("paste_here"), value=g.get("input_text", ""), height=220)
+
+    st.markdown("### Optional hints (improves retrieval quality)")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        g["product_code"] = st.text_input("FDA product code (optional)", value=g.get("product_code", ""))
+    with c2:
+        g["device_type"] = st.text_input("Device type / category", value=g.get("device_type", ""))
+    with c3:
+        g["topic_hint"] = st.text_input("Topic hint (e.g., sterilization / biocompatibility / SaMD)", value=g.get("topic_hint", ""))
+
+    g["user_urls"] = st.text_area("User-provided reference URLs (one per line, optional)", value=g.get("user_urls", ""), height=100)
+
+    # Retrieval
+    st.markdown("### Retrieval & sources")
+    if st.button("Run retrieval"):
+        sources: List[SourceItem] = []
+        # User URLs always included
+        sources.extend(user_url_sources(g.get("user_urls", "")))
+
+        if not g.get("offline_mode", False):
+            # openFDA 510k by product code
+            if g.get("product_code", "").strip():
+                sources.extend(openfda_510k_by_product_code(g["product_code"].strip(), limit=5))
+            # guidance/standards best effort
+            topic = (g.get("topic_hint") or g.get("device_type") or "medical device").strip()
+            sources.extend(retrieve_fda_guidance_and_standards(topic, limit_each=5))
+
+        g["sources"] = [s.__dict__ for s in sources]
+        st.success(f"Sources collected: {len(sources)}")
+
+    sources_objs = [SourceItem(**x) for x in (g.get("sources", []) or [])]
+    st.markdown(sources_to_markdown(sources_objs, g["output_lang"]) if sources_objs else "_No sources yet._")
+
+    # Build input package for Step A/B/C
+    filename = (g.get("input_meta", {}) or {}).get("filename", "")
+    page_markers = (g.get("input_meta", {}) or {}).get("page_markers", []) or []
+    page_citation_hint = ""
+    if page_markers:
+        page_citation_hint = "PDF page markers exist: cite as [G-p12] etc."
+    else:
+        page_citation_hint = "No PDF page markers: cite as [G] for uploaded guidance."
+
+    guidance_block = f"""[UPLOADED_GUIDANCE]
+Filename: {filename or "N/A"}
+{page_citation_hint}
+
+Content:
+{g.get("input_text","")}
+"""
+
+    sources_block = sources_to_markdown(sources_objs, g["output_lang"]) if sources_objs else ""
+
+    # ---------------- Step A ----------------
+    st.markdown("## " + t("step_a"))
+    g["stepA_model"] = st.selectbox("Model (Step A)", GEMINI_GUIDANCE_MODELS_STEP_A,
+                                   index=GEMINI_GUIDANCE_MODELS_STEP_A.index(g.get("stepA_model", GEMINI_GUIDANCE_MODELS_STEP_A[0])))
+    default_stepA_prompt_en = """You will produce a 2000–3000 word Markdown report grounded in:
+(1) the uploaded guidance content, and
+(2) the provided external sources list.
+
+Hard rules:
+- Every major claim must include citations like [G-p12] for uploaded guidance pages or [SG1]/[SS2]/[S510K1] for external sources.
+- If external retrieval is missing/unreliable, explicitly state limitations and provide a verification checklist.
+- Include: executive summary, document synopsis with key excerpts, FDA landscape, international alignment, standards & testing implications, compliance checklist table, gaps/questions, appendices with source library.
+
+Write in the specified output language.
+"""
+    default_stepA_prompt_tc = """請以 2000–3000 字 Markdown 生成「具引用之法規研究報告」，並以：
+(1) 使用者上傳之指引內容、以及
+(2) 外部來源清單
+作為落地（grounding）依據。
+
+硬性規則：
+- 每個重大主張必須附引用，例如：上傳 PDF 以 [G-p12] 標示頁碼；外部來源以 [SG1]/[SS2]/[S510K1] 等標示。
+- 若外部檢索不足或不可用，必須明確揭露限制並提供「待查證清單」。
+- 必含：執行摘要、文件重點（含引用）、FDA 情境（guidance/510k/recognized standards）、國際法規對照、標準/測試意涵、審查清單表、落差與待釐清問題、附錄來源彙整。
+
+請用指定輸出語言完整撰寫。
+"""
+    if not g.get("stepA_prompt"):
+        g["stepA_prompt"] = default_stepA_prompt_tc if g["output_lang"] == "繁體中文" else default_stepA_prompt_en
+    g["stepA_prompt"] = st.text_area("Prompt (Step A, editable)", value=g.get("stepA_prompt", ""), height=200)
+
+    if st.button("Run Step A"):
+        st.session_state["wow"]["global_status"] = "Running"
+        start = time.time()
+        sys_p = st.session_state["agents_cfg"]["agents"]["guidance_analyze_research_agent"]["system_prompt"]
+        user_p = g["stepA_prompt"]
+        payload = f"""Output language: {g['output_lang']}
+
+{guidance_block}
+
+[EXTERNAL_SOURCES]
+{sources_block}
+"""
+        try:
+            out = call_llm(
+                model=g["stepA_model"],
+                system_prompt=sys_p,
+                user_prompt=user_p + "\n\n---\n\n" + payload,
+                max_tokens=int(st.session_state["settings"]["max_tokens"]),
+                temperature=float(st.session_state["settings"]["temperature"]),
+            )
+            duration_ms = int((time.time() - start) * 1000)
+            g["stepA_out"] = out
+            st.session_state["wow"]["global_status"] = "Ready"
+            log_event("Guidance Reviewer", "guidance_analyze_research_agent", g["stepA_model"], provider_for_model(g["stepA_model"]),
+                      approx_tokens(sys_p + user_p + payload), approx_tokens(out), duration_ms)
+        except Exception as e:
+            st.session_state["wow"]["global_status"] = "Ready"
+            st.error(f"{t('error')}: {e}")
+
+    st.markdown("### Step A output (editable)")
+    if g.get("stepA_out"):
+        st.markdown(g["stepA_out"], unsafe_allow_html=True)
+    g["stepA_out"] = st.text_area("Editable Step A Markdown", value=g.get("stepA_out", ""), height=260)
+
+    st.download_button("Download Step A (.md)", data=(g.get("stepA_out", "")).encode("utf-8"),
+                       file_name="comprehensive_report.md", mime="text/markdown")
+    st.download_button("Download Step A (.txt)", data=re.sub(r"<[^>]+>", "", (g.get("stepA_out",""))).encode("utf-8"),
+                       file_name="comprehensive_report.txt", mime="text/plain")
+
+    # ---------------- Step B ----------------
+    st.markdown("## " + t("step_b"))
+    g["stepB_model"] = st.selectbox("Model (Step B)", GEMINI_GUIDANCE_MODELS_STEP_B,
+                                   index=GEMINI_GUIDANCE_MODELS_STEP_B.index(g.get("stepB_model", GEMINI_GUIDANCE_MODELS_STEP_B[0])))
+
+    templ_choice = st.radio(t("template"), [t("use_default_template"), t("upload_template")], horizontal=True)
+    if templ_choice == t("use_default_template"):
+        g["stepB_template"] = DEFAULT_REPORT_TEMPLATE_TC if g["output_lang"] == "繁體中文" else DEFAULT_REPORT_TEMPLATE_EN
+        st.code(g["stepB_template"], language="markdown")
+    else:
+        t_up = st.file_uploader(t("upload_template"), type=["md", "txt"], key="templ_up")
+        if t_up is not None:
+            txt, _ = read_uploaded_file(t_up)
+            g["stepB_template"] = txt
+        g["stepB_template"] = st.text_area("Template text", value=g.get("stepB_template", ""), height=200)
+
+    if not g.get("stepB_prompt"):
+        g["stepB_prompt"] = "Fit the report into the template. Preserve citations. Do not delete key compliance content."
+    g["stepB_prompt"] = st.text_area("Prompt (Step B, editable)", value=g.get("stepB_prompt", ""), height=120)
+
+    if st.button("Run Step B"):
+        if not (g.get("stepA_out", "").strip() and g.get("stepB_template", "").strip()):
+            st.error("Step A output and template are required.")
+        else:
+            st.session_state["wow"]["global_status"] = "Running"
+            start = time.time()
+            sys_p = st.session_state["agents_cfg"]["agents"]["template_report_agent"]["system_prompt"]
+            user_p = g["stepB_prompt"]
+            payload = f"""Output language: {g['output_lang']}
+
+[TEMPLATE]
+{g['stepB_template']}
+
+[INPUT_REPORT]
+{g['stepA_out']}
+"""
+            try:
+                out = call_llm(
+                    model=g["stepB_model"],
+                    system_prompt=sys_p,
+                    user_prompt=user_p + "\n\n---\n\n" + payload,
+                    max_tokens=int(st.session_state["settings"]["max_tokens"]),
+                    temperature=float(st.session_state["settings"]["temperature"]),
+                )
+                duration_ms = int((time.time() - start) * 1000)
+                g["stepB_out"] = out
+                st.session_state["wow"]["global_status"] = "Ready"
+                log_event("Guidance Reviewer", "template_report_agent", g["stepB_model"], provider_for_model(g["stepB_model"]),
+                          approx_tokens(sys_p + user_p + payload), approx_tokens(out), duration_ms)
+            except Exception as e:
+                st.session_state["wow"]["global_status"] = "Ready"
+                st.error(f"{t('error')}: {e}")
+
+    st.markdown("### Step B output (editable)")
+    if g.get("stepB_out"):
+        st.markdown(g["stepB_out"], unsafe_allow_html=True)
+    g["stepB_out"] = st.text_area("Editable Step B Markdown", value=g.get("stepB_out", ""), height=260)
+
+    st.download_button("Download Step B (.md)", data=(g.get("stepB_out", "")).encode("utf-8"),
+                       file_name="template_report.md", mime="text/markdown")
+    st.download_button("Download Step B (.txt)", data=re.sub(r"<[^>]+>", "", (g.get("stepB_out",""))).encode("utf-8"),
+                       file_name="template_report.txt", mime="text/plain")
+
+    # ---------------- Step C ----------------
+    st.markdown("## " + t("step_c"))
+    g["stepC_model"] = st.selectbox("Model (Step C)", GEMINI_GUIDANCE_MODELS_STEP_C,
+                                   index=GEMINI_GUIDANCE_MODELS_STEP_C.index(g.get("stepC_model", GEMINI_GUIDANCE_MODELS_STEP_C[0])))
+
+    if not g.get("stepC_prompt"):
+        g["stepC_prompt"] = (
+            "Use skill-creator style. Create a SKILL.md with YAML frontmatter (name, description). "
+            "Write in the specified output language. Include 3 WOW behaviors: Auto-Crosswalk Builder, "
+            "Citation Quality Gate, Checklist-to-Actions Converter. Provide output templates and examples."
+        )
+    g["stepC_prompt"] = st.text_area("Prompt (Step C, editable)", value=g.get("stepC_prompt", ""), height=140)
+
+    if st.button("Run Step C (skill.md)"):
+        if not g.get("stepB_out", "").strip():
+            st.error("Step B output is required (template-based report).")
+        else:
+            st.session_state["wow"]["global_status"] = "Running"
+            start = time.time()
+            sys_p = st.session_state["agents_cfg"]["agents"]["skill_md_generator_agent"]["system_prompt"]
+            user_p = g["stepC_prompt"]
+            payload = f"""Output language: {g['output_lang']}
+
+[UPLOADED_GUIDANCE]
+{guidance_block}
+
+[COMPREHENSIVE_REPORT_STEP_A]
+{g.get('stepA_out','')}
+
+[TEMPLATE_BASED_REPORT_STEP_B]
+{g.get('stepB_out','')}
+"""
+            try:
+                out = call_llm(
+                    model=g["stepC_model"],
+                    system_prompt=sys_p,
+                    user_prompt=user_p + "\n\n---\n\n" + payload,
+                    max_tokens=int(st.session_state["settings"]["max_tokens"]),
+                    temperature=float(st.session_state["settings"]["temperature"]),
+                )
+                duration_ms = int((time.time() - start) * 1000)
+                g["skill_md"] = out
+                st.session_state["wow"]["global_status"] = "Ready"
+                log_event("Guidance Reviewer", "skill_md_generator_agent", g["stepC_model"], provider_for_model(g["stepC_model"]),
+                          approx_tokens(sys_p + user_p + payload), approx_tokens(out), duration_ms)
+            except Exception as e:
+                st.session_state["wow"]["global_status"] = "Ready"
+                st.error(f"{t('error')}: {e}")
+
+    st.markdown("### skill.md (editable)")
+    if g.get("skill_md"):
+        st.markdown(g["skill_md"], unsafe_allow_html=True)
+    g["skill_md"] = st.text_area("Editable skill.md", value=g.get("skill_md", ""), height=260)
+    st.download_button("Download skill.md", data=(g.get("skill_md", "")).encode("utf-8"),
+                       file_name="skill.md", mime="text/markdown")
+
+    # WOW AI Features
+    st.divider()
+    st.markdown("## WOW AI Features")
+
+    # 1) Knowledge graph
+    st.markdown("### " + t("knowledge_graph"))
+    graph_input = g.get("stepA_out") or g.get("stepB_out") or g.get("input_text", "")
+    if st.button(t("build_graph")):
+        st.session_state["wow"]["global_status"] = "Running"
+        start = time.time()
+        sys_p = st.session_state["agents_cfg"]["agents"]["knowledge_graph_agent"]["system_prompt"]
+        user_p = st.session_state["agents_cfg"]["agents"]["knowledge_graph_agent"]["user_prompt"]
+        payload = graph_input
+        try:
+            out = call_llm(
+                model=st.session_state["agents_cfg"]["agents"]["knowledge_graph_agent"]["model"],
+                system_prompt=sys_p,
+                user_prompt=user_p + "\n\n---\n\n" + payload,
+                max_tokens=8000,
+                temperature=0.2,
+            )
+            duration_ms = int((time.time() - start) * 1000)
+            g["graph_json"] = out
+            st.session_state["wow"]["global_status"] = "Ready"
+            log_event("Guidance Reviewer", "knowledge_graph_agent",
+                      st.session_state["agents_cfg"]["agents"]["knowledge_graph_agent"]["model"],
+                      provider_for_model(st.session_state["agents_cfg"]["agents"]["knowledge_graph_agent"]["model"]),
+                      approx_tokens(sys_p + user_p + payload), approx_tokens(out), duration_ms)
+        except Exception as e:
+            st.session_state["wow"]["global_status"] = "Ready"
+            st.error(f"{t('error')}: {e}")
+
+    g["graph_json"] = st.text_area("Graph JSON (editable)", value=g.get("graph_json", ""), height=200)
+    if g.get("graph_json"):
+        # Render if graphviz available
+        try:
+            data = json.loads(g["graph_json"])
+            nodes = data.get("nodes", [])
+            edges = data.get("edges", [])
+            st.caption(f"Nodes: {len(nodes)} · Edges: {len(edges)}")
+            if graphviz is not None and edges:
+                dot = graphviz.Digraph()
+                # add nodes (limit to keep UI responsive)
+                node_set = set()
+                for e in edges[:80]:
+                    node_set.add(e.get("source", ""))
+                    node_set.add(e.get("target", ""))
+                for n in list(node_set)[:60]:
+                    if n:
+                        dot.node(n[:60])
+                for e in edges[:80]:
+                    s0 = (e.get("source", "") or "")[:60]
+                    t0 = (e.get("target", "") or "")[:60]
+                    rel = (e.get("relation", "") or "")[:30]
+                    if s0 and t0:
+                        dot.edge(s0, t0, label=rel)
+                st.graphviz_chart(dot)
+            else:
+                st.dataframe(edges[:200] if isinstance(edges, list) else [])
+        except Exception:
+            st.info("Graph JSON is not valid JSON yet. You can edit and retry rendering.")
+
+    # 2) Grounding inspector
+    st.markdown("### " + t("grounding_inspector"))
+    inspect_input = g.get("stepA_out") or ""
+    if st.button(t("inspect")):
+        if not inspect_input.strip():
+            st.error("Need Step A output for grounding inspection.")
+        else:
+            st.session_state["wow"]["global_status"] = "Running"
+            start = time.time()
+            agent = st.session_state["agents_cfg"]["agents"]["grounding_inspector_agent"]
+            sys_p = agent["system_prompt"]
+            user_p = agent["user_prompt"]
+            payload = "Output language: " + g["output_lang"] + "\n\n" + inspect_input
+            try:
+                out = call_llm(
+                    model=agent["model"],
+                    system_prompt=sys_p,
+                    user_prompt=user_p + "\n\n---\n\n" + payload,
+                    max_tokens=8000,
+                    temperature=0.2,
+                )
+                duration_ms = int((time.time() - start) * 1000)
+                g["grounding_report"] = out
+                st.session_state["wow"]["global_status"] = "Ready"
+                log_event("Guidance Reviewer", "grounding_inspector_agent", agent["model"], provider_for_model(agent["model"]),
+                          approx_tokens(sys_p + user_p + payload), approx_tokens(out), duration_ms)
+            except Exception as e:
+                st.session_state["wow"]["global_status"] = "Ready"
+                st.error(f"{t('error')}: {e}")
+
+    st.markdown(g.get("grounding_report", ""), unsafe_allow_html=True)
+
+    # 3) Bilingual renderer
+    st.markdown("### " + t("bilingual"))
+    other_lang = "English" if g["output_lang"] == "繁體中文" else "繁體中文"
+    g["bilingual_other_lang"] = other_lang
+    bilingual_input = g.get("stepB_out") or g.get("stepA_out") or ""
+    if st.button(t("render_bilingual")):
+        if not bilingual_input.strip():
+            st.error("Need Step A or Step B output to render bilingual view.")
+        else:
+            st.session_state["wow"]["global_status"] = "Running"
+            start = time.time()
+            agent = st.session_state["agents_cfg"]["agents"]["bilingual_renderer_agent"]
+            sys_p = agent["system_prompt"]
+            user_p = agent["user_prompt"]
+            payload = f"""Primary language: {g['output_lang']}
+Secondary language: {other_lang}
+
+Content:
+{bilingual_input}
+"""
+            try:
+                out = call_llm(
+                    model=agent["model"],
+                    system_prompt=sys_p,
+                    user_prompt=user_p + "\n\n---\n\n" + payload,
+                    max_tokens=12000,
+                    temperature=0.2,
+                )
+                duration_ms = int((time.time() - start) * 1000)
+                g["bilingual_out"] = out
+                st.session_state["wow"]["global_status"] = "Ready"
+                log_event("Guidance Reviewer", "bilingual_renderer_agent", agent["model"], provider_for_model(agent["model"]),
+                          approx_tokens(sys_p + user_p + payload), approx_tokens(out), duration_ms)
+            except Exception as e:
+                st.session_state["wow"]["global_status"] = "Ready"
+                st.error(f"{t('error')}: {e}")
+
+    if g.get("bilingual_out"):
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"#### {g['output_lang']}")
+            st.markdown(bilingual_input, unsafe_allow_html=True)
+        with colB:
+            st.markdown(f"#### {other_lang}")
+            st.markdown(g["bilingual_out"], unsafe_allow_html=True)
+
+
+# -----------------------------
+# Agents Config Studio
+# -----------------------------
+
+def render_agents_studio() -> None:
+    st.subheader(t("tabs_agents"))
+    ensure_agents_catalog()
+
+    if yaml is None:
+        st.warning("PyYAML not installed.")
+        st.json(st.session_state["agents_cfg"])
+        return
+
+    agents = st.session_state["agents_cfg"].get("agents", {})
+    st.markdown(f"### Agents overview ({len(agents)})")
+    st.dataframe(
+        [{"agent_id": k, "model": v.get("model"), "max_tokens": v.get("max_tokens"), "temperature": v.get("temperature")} for k, v in agents.items()],
+        use_container_width=True
+    )
+
+    st.markdown("### Edit raw YAML (session only)")
+    raw = yaml.safe_dump(st.session_state["agents_cfg"], sort_keys=False, allow_unicode=True)
+    edited = st.text_area("agents.yaml", value=raw, height=360)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Apply YAML to session"):
+            try:
+                data = yaml.safe_load(edited)
+                if not (isinstance(data, dict) and "agents" in data and isinstance(data["agents"], dict)):
+                    raise ValueError("Invalid format: requires top-level 'agents' dict.")
+                st.session_state["agents_cfg"] = data
+                st.success("Applied.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"{t('error')}: {e}")
+    with c2:
+        st.download_button("Download agents.yaml", data=edited.encode("utf-8"), file_name="agents.yaml", mime="text/yaml")
+
+
+# -----------------------------
+# Main
+# -----------------------------
+
+def main() -> None:
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    init_session_state()
+    ensure_agents_catalog()
+
+    render_sidebar()
+    wow_header()
+
+    tabs = st.tabs([
+        t("tabs_dashboard"),
+        t("tabs_tw"),
+        t("tabs_510k_intel"),
+        t("tabs_pdf_md"),
+        t("tabs_510k_pipeline"),
+        t("tabs_notes"),
+        t("tabs_guidance"),
+        t("tabs_agents"),
+    ])
+
+    with tabs[0]:
+        render_dashboard()
+    with tabs[1]:
+        render_tw_premarket()
+    with tabs[2]:
+        render_510k_intel()
+    with tabs[3]:
+        render_pdf_to_md()
+    with tabs[4]:
+        render_510k_pipeline()
+    with tabs[5]:
+        render_notes()
+    with tabs[6]:
+        render_guidance_workspace()
+    with tabs[7]:
+        render_agents_studio()
+
+
+if __name__ == "__main__":
+    main()
